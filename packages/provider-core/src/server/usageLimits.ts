@@ -102,6 +102,7 @@ function usageWindowEquals(a: ServerProviderUsageWindow, b: ServerProviderUsageW
     a.id === b.id &&
     a.kind === b.kind &&
     a.label === b.label &&
+    a.modelFamily === b.modelFamily &&
     a.usedPercent === b.usedPercent &&
     a.resetsAt === b.resetsAt &&
     a.windowDurationMins === b.windowDurationMins

@@ -1,3 +1,4 @@
+import { makeDelegationFixtures } from "./testkit/DelegationFixtures.ts";
 import { assert, describe, it, vi } from "@effect/vitest";
 import {
   type ChatAttachment,
@@ -35,6 +36,9 @@ const modelSelection = {
   model: "gpt-5.1-codex",
 } as const;
 
+const delegationFixtures = makeDelegationFixtures([
+  { ...modelSelection, driver: ProviderDriverKind.make("codex") },
+]);
 const adapter = {
   instanceId: modelSelection.instanceId,
   driver: ProviderDriverKind.make("codex"),
@@ -59,6 +63,8 @@ function makeHarness(
   const layerThreadManagement = ThreadManagement.layer.pipe(
     Layer.provide(layerOrchestrator),
     Layer.provide(layerServerSettings),
+    Layer.provide(layerRegistry),
+    Layer.provide(delegationFixtures.layerRegistry),
     Layer.provide(CommandReceiptStore.layer.pipe(Layer.provide(layerDatabase))),
   );
   const layerOutbox = EffectOutbox.layer.pipe(Layer.provide(layerDatabase));

@@ -9,6 +9,8 @@ import type {
 } from "./ProjectionStore.ts";
 import {
   type ChatAttachment,
+  type DelegationCapability,
+  type DelegationTaskRole,
   CommandId,
   MessageId,
   OrchestrationV2StopWorkflowError,
@@ -27,12 +29,14 @@ import {
   type OrchestrationV2TurnItem,
   ProjectId,
   ProviderInstanceId,
+  ProviderDriverKind,
   resolveProjectProviderInstanceEnabled,
   RunId,
   type ScheduledTaskId,
   ThreadId,
   type TurnItemId,
 } from "@t3tools/contracts";
+import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
@@ -51,6 +55,33 @@ import { DispatchModeLimit, exceededDispatchModeLimit } from "./DispatchModeLimi
 import { projectTurnItemForDetail } from "./WireProjection.ts";
 import * as LegacyV1ThreadImporter from "./legacy/LegacyV1ThreadImporter.ts";
 import * as ServerSettings from "../serverSettings.ts";
+import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
+import * as ProviderAdapterRegistry from "./ProviderAdapterRegistry.ts";
+import { selectDelegationTarget } from "./delegationRouting.ts";
+import { managedDelegationDrivers, resolveDelegationPolicy } from "./combinedDelegationRoutes.ts";
+
+export class ThreadManagementDelegationOptionsError extends Schema.TaggedError<ThreadManagementDelegationOptionsError>()(
+  "ThreadManagementDelegationOptionsError",
+  { category: Schema.Literals(["forbidden-effort", "forbidden-speed", "invalid-options"]) },
+) {
+  override get message(): string {
+    return this.category === "forbidden-effort"
+      ? "Delegated tasks require low, medium, high, or xhigh effort."
+      : this.category === "forbidden-speed"
+        ? "Delegated tasks cannot request fast mode or priority service."
+        : "The delegated model does not support the requested options.";
+  }
+}
+
+const defaultDelegationCapability: Readonly<Record<DelegationTaskRole, DelegationCapability>> = {
+  research: "discovery",
+  implementation: "coding",
+  test: "coding",
+  design: "architecture",
+  general: "routine",
+  advice: "architecture",
+  review: "architecture",
+};
 
 export type ThreadManagementSendMode = "auto" | "queue" | "steer" | "restart";
 
@@ -533,6 +564,8 @@ const make = Effect.gen(function* () {
   const legacyImporter = yield* LegacyV1ThreadImporter.LegacyV1ThreadImporter;
   const serverSettings = yield* ServerSettings.ServerSettingsService;
   const receipts = yield* CommandReceiptStore.CommandReceiptStoreV2;
+  const providerRegistry = yield* ProviderRegistry.ProviderRegistry;
+  const providerAdapters = yield* ProviderAdapterRegistry.ProviderAdapterRegistryV2;
 
   const assertProviderInstanceEnabled: ThreadManagementServiceShape["assertProviderInstanceEnabled"] =
     (input) =>
@@ -665,11 +698,262 @@ const make = Effect.gen(function* () {
     }
   };
 
+  const resolveDelegation = Effect.fn("orchestrationV2.threadManagement.resolveDelegation")(
+    function* (
+      command: Extract<OrchestrationV2ServerCommand, { readonly type: "delegated_task.request" }>,
+    ) {
+      const role = command.role ?? "general";
+      const capability =
+        role === "advice" || role === "review"
+          ? "architecture"
+          : (command.capability ?? defaultDelegationCapability[role]);
+      const requestedOptions = command.modelSelection.options ?? [];
+      for (const option of requestedOptions) {
+        if (
+          /effort|reasoning|thinking/i.test(option.id) &&
+          (!["effort", "reasoningEffort"].includes(option.id) ||
+            typeof option.value !== "string" ||
+            !["low", "medium", "high", "xhigh"].includes(option.value))
+        ) {
+          return yield* new ThreadManagementDelegationOptionsError({
+            category: "forbidden-effort",
+          });
+        }
+        if (
+          (["fastMode", "fast"].includes(option.id) && option.value !== false) ||
+          (["serviceTier", "service_tier", "speed", "priority"].includes(option.id) &&
+            option.value !== false &&
+            option.value !== "default" &&
+            option.value !== "standard" &&
+            option.value !== "normal")
+        ) {
+          return yield* new ThreadManagementDelegationOptionsError({ category: "forbidden-speed" });
+        }
+      }
+      const parent = yield* orchestrator.getThreadRecords(command.parentThreadId, ["subagents"]);
+      const excludedReviewerModels = new Set<string>();
+      if (role === "review") {
+        excludedReviewerModels.add(parent.thread.modelSelection.model);
+        const records = new Map<ThreadId, ProjectionRecords<"subagents">>([
+          [parent.thread.id, parent],
+        ]);
+        const ancestorIds = new Set<ThreadId>();
+        let root = parent;
+        while (
+          root.thread.lineage?.relationshipToParent === "subagent" &&
+          root.thread.lineage.parentThreadId !== null
+        ) {
+          const ancestorId = root.thread.lineage.parentThreadId;
+          if (ancestorIds.has(ancestorId)) break;
+          ancestorIds.add(ancestorId);
+          const ancestor =
+            records.get(ancestorId) ??
+            (yield* orchestrator.getThreadRecords(ancestorId, ["subagents"]));
+          records.set(ancestorId, ancestor);
+          if (
+            !ancestor.subagents.some(
+              (task) => task.origin === "app_owned" && task.childThreadId === root.thread.id,
+            )
+          )
+            break;
+          root = ancestor;
+        }
+        excludedReviewerModels.add(root.thread.modelSelection.model);
+        const visited = new Set<ThreadId>();
+        const pending = [root];
+        while (pending.length > 0) {
+          const current = pending.pop()!;
+          if (visited.has(current.thread.id)) continue;
+          visited.add(current.thread.id);
+          for (const task of current.subagents) {
+            if (
+              !["review", "advice", "research"].includes(task.delegationRole ?? "implementation")
+            ) {
+              const model = task.modelSelection?.model ?? task.model;
+              if (model !== null) excludedReviewerModels.add(model);
+            }
+            if (
+              task.origin !== "app_owned" ||
+              task.childThreadId === null ||
+              visited.has(task.childThreadId)
+            )
+              continue;
+            const child =
+              records.get(task.childThreadId) ??
+              (yield* orchestrator.getThreadRecords(task.childThreadId, ["subagents"]));
+            records.set(task.childThreadId, child);
+            if (
+              child.thread.lineage?.relationshipToParent === "subagent" &&
+              child.thread.lineage.parentThreadId === current.thread.id
+            )
+              pending.push(child);
+          }
+        }
+      }
+      const settings = yield* serverSettings.getSettings.pipe(Effect.orDie);
+      const policy = resolveDelegationPolicy(settings.delegationPolicy);
+      const staleCheckMs = yield* Clock.currentTimeMillis;
+      const servingInstances = yield* providerAdapters.list();
+      let providers = yield* providerRegistry.getProviders;
+      const relevantDrivers = new Set(
+        policy.routes
+          .filter((route) => route.capabilities.includes(capability))
+          .map((route) => route.driver),
+      );
+      if (role === "advice" || role === "review")
+        relevantDrivers.add(ProviderDriverKind.make("claudeAgent"));
+      const staleAccounts = providers.filter((provider) => {
+        if (
+          !["codex", "claudeAgent"].includes(provider.driver) ||
+          !relevantDrivers.has(provider.driver) ||
+          !servingInstances.includes(provider.instanceId) ||
+          !provider.enabled ||
+          !provider.installed ||
+          provider.availability === "unavailable" ||
+          !["ready", "warning"].includes(provider.status) ||
+          provider.auth.status === "unauthenticated" ||
+          !resolveProjectProviderInstanceEnabled(
+            settings,
+            parent.thread.projectId,
+            provider.instanceId,
+          )
+        )
+          return false;
+        const observedMs = Date.parse(provider.usageLimits?.checkedAt ?? "");
+        return (
+          !Number.isFinite(observedMs) ||
+          observedMs > staleCheckMs ||
+          staleCheckMs - observedMs > 300_000
+        );
+      });
+      if (staleAccounts.length > 0) {
+        yield* Effect.forEach(
+          staleAccounts,
+          (provider) => providerRegistry.refreshInstance(provider.instanceId),
+          { concurrency: 2, discard: true },
+        );
+        providers = yield* providerRegistry.getProviders;
+      }
+      const explicit =
+        policy.mode === "native-preferred" && command.delegationTargetExplicit === true;
+      const targetProvider = providers.find(
+        (provider) => provider.instanceId === command.modelSelection.instanceId,
+      );
+      const targetModel = targetProvider?.models.find(
+        (model) =>
+          model.slug === command.modelSelection.model ||
+          model.aliases?.includes(command.modelSelection.model),
+      );
+      if (explicit && targetModel) {
+        for (const option of requestedOptions) {
+          const descriptor = targetModel.capabilities?.optionDescriptors?.find(
+            (entry) => entry.id === option.id,
+          );
+          if (
+            !descriptor ||
+            (descriptor.type === "boolean"
+              ? typeof option.value !== "boolean"
+              : descriptor.type !== "select" ||
+                !descriptor.options.some((choice) => choice.id === option.value))
+          ) {
+            return yield* new ThreadManagementDelegationOptionsError({
+              category: "invalid-options",
+            });
+          }
+        }
+      }
+      const requestedEfforts = requestedOptions.filter((option) =>
+        ["effort", "reasoningEffort"].includes(option.id),
+      );
+      const candidateProviders = providers.map((provider) => ({
+        ...provider,
+        enabled:
+          resolveProjectProviderInstanceEnabled(
+            settings,
+            parent.thread.projectId,
+            provider.instanceId,
+          ) &&
+          (policy.mode !== "t3-managed" || managedDelegationDrivers.has(provider.driver)) &&
+          (!provider.supportedRuntimeModes ||
+            provider.supportedRuntimeModes.includes(command.runtimeMode)),
+        models: provider.models,
+      }));
+      const selectionNowMs = yield* Clock.currentTimeMillis;
+      const selection = selectDelegationTarget({
+        policy:
+          explicit && requestedEfforts.length > 0
+            ? {
+                ...policy,
+                routes: policy.routes.filter((route) =>
+                  requestedEfforts.every((option) => option.value === route.effort),
+                ),
+              }
+            : policy,
+        providers: candidateProviders,
+        parent: parent.thread.modelSelection,
+        role,
+        capability,
+        nowMs: selectionNowMs,
+        hiddenModelsByInstance: Object.fromEntries(
+          Object.entries(settings.providerModelPreferences ?? {}).map(
+            ([instanceId, preferences]) => [instanceId, preferences.hiddenModels] as const,
+          ),
+        ),
+        allowedProviderInstanceIds: servingInstances,
+        ...(explicit ? { requestedTarget: command.modelSelection } : {}),
+        activeAssignments: parent.subagents
+          .filter((task) => ["pending", "running", "waiting"].includes(task.status))
+          .flatMap((task) => (task.modelSelection ? [task.modelSelection] : [])),
+        excludedReviewerModels: [...excludedReviewerModels],
+      });
+      if (!selection.ok) return yield* selection.error;
+      const chosenOptionIds = new Set(selection.modelSelection.options?.map((option) => option.id));
+      return {
+        ...command,
+        role,
+        capability,
+        modelSelection: explicit
+          ? {
+              ...selection.modelSelection,
+              options: [
+                ...requestedOptions.filter((option) => !chosenOptionIds.has(option.id)),
+                ...(selection.modelSelection.options ?? []),
+              ],
+            }
+          : selection.modelSelection,
+        routingDecision: selection.decision,
+      };
+    },
+  );
+
   const dispatch: ThreadManagementServiceShape["dispatch"] = (command) =>
-    ensureCommandTranscripts(command).pipe(
-      Effect.andThen(assertDispatchTargetEnabled(command)),
-      Effect.andThen(orchestrator.dispatch(command)),
-    );
+    Effect.gen(function* () {
+      // Receipts replay committed events before current catalogs or policy can refuse the request.
+      if (command.type === "delegated_task.request" && (yield* hasReceipt(command.commandId)))
+        return yield* orchestrator.dispatch(command);
+      yield* ensureCommandTranscripts(command);
+      const resolved =
+        command.type === "delegated_task.request"
+          ? yield* resolveDelegation(command).pipe(
+              Effect.catchTags({
+                DelegationSelectionError: (cause) =>
+                  new Orchestrator.OrchestratorCommandRejectedError({
+                    commandId: command.commandId,
+                    commandType: command.type,
+                    cause,
+                  }),
+                ThreadManagementDelegationOptionsError: (cause) =>
+                  new Orchestrator.OrchestratorCommandRejectedError({
+                    commandId: command.commandId,
+                    commandType: command.type,
+                    cause,
+                  }),
+              }),
+            )
+          : command;
+      yield* assertDispatchTargetEnabled(resolved);
+      return yield* orchestrator.dispatch(resolved);
+    });
 
   const getProjectThread: ThreadManagementServiceShape["getProjectThread"] = (input) =>
     getThreadProjection(input.threadId).pipe(
@@ -1204,6 +1488,8 @@ export const layer: Layer.Layer<
   | ProviderSessionManager.ProviderSessionManagerV2
   | ServerSettings.ServerSettingsService
   | CommandReceiptStore.CommandReceiptStoreV2
+  | ProviderRegistry.ProviderRegistry
+  | ProviderAdapterRegistry.ProviderAdapterRegistryV2
 > = Layer.effect(ThreadManagementService, make).pipe(
   Layer.provide(layerLegacyV1ThreadImporterNoop),
   Layer.provide(ThreadCommandExecutor.layer),
@@ -1217,4 +1503,6 @@ export const layerWithLegacyImporter: Layer.Layer<
   | ProviderSessionManager.ProviderSessionManagerV2
   | ServerSettings.ServerSettingsService
   | CommandReceiptStore.CommandReceiptStoreV2
+  | ProviderRegistry.ProviderRegistry
+  | ProviderAdapterRegistry.ProviderAdapterRegistryV2
 > = Layer.effect(ThreadManagementService, make).pipe(Layer.provide(ThreadCommandExecutor.layer));

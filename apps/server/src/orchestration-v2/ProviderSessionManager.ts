@@ -200,6 +200,7 @@ export class ProviderSessionManagerV2 extends Context.Service<
 >()("t3/orchestration-v2/ProviderSessionManager/ProviderSessionManagerV2") {}
 
 interface LiveSessionEntry {
+  readonly delegationMode: "native-preferred" | "t3-managed";
   readonly attachedThreadIds: ReadonlySet<ThreadId>;
   readonly loadedProviderThreadKeyByThread: ReadonlyMap<ThreadId, string>;
   /**
@@ -2169,8 +2170,63 @@ export const layerWithOptions = (
                   });
                 }
               }
+              const readDelegationMode = Option.isSome(serverSettings)
+                ? serverSettings.value.getSettings.pipe(
+                    Effect.map((settings) => settings.delegationPolicy.mode),
+                    Effect.mapError(
+                      (cause) =>
+                        new ProviderSessionOpenError({
+                          instanceId: input.modelSelection.instanceId,
+                          providerSessionId: input.providerSessionId,
+                          cause,
+                        }),
+                    ),
+                  )
+                : Effect.succeed("native-preferred" as const);
+              let delegationMode = yield* readDelegationMode;
               const key = sessionKey(input.providerSessionId);
-              const existing = (yield* Ref.get(sessions)).get(key);
+              let existing = (yield* Ref.get(sessions)).get(key);
+              while (existing !== undefined && existing.delegationMode !== delegationMode) {
+                const candidate = existing;
+                yield* Effect.acquireUseRelease(
+                  makeEventSubscription(candidate.eventSubscribers),
+                  (subscription) =>
+                    Effect.gen(function* () {
+                      const current = (yield* Ref.get(sessions)).get(key);
+                      if (current?.runtime !== candidate.runtime) return;
+                      const hasPendingWork =
+                        candidate.runtime.hasPendingBackgroundWork === undefined
+                          ? false
+                          : yield* candidate.runtime.hasPendingBackgroundWork.pipe(
+                              Effect.catchCause(() => Effect.succeed(true)),
+                            );
+                      if (current.busyTurns.size > 0 || hasPendingWork) {
+                        yield* subscription.events.pipe(
+                          Stream.runHead,
+                          Effect.mapError(
+                            (cause) =>
+                              new ProviderSessionOpenError({
+                                instanceId: input.modelSelection.instanceId,
+                                providerSessionId: input.providerSessionId,
+                                cause,
+                              }),
+                          ),
+                        );
+                        return;
+                      }
+                      yield* releaseEntry({
+                        providerSessionId: input.providerSessionId,
+                        reason: "manual_shutdown",
+                        detail: "Delegation policy changed.",
+                        gracefulSubscribers: true,
+                        onlyIfIdleGeneration: current.idleGeneration,
+                      });
+                    }),
+                  (subscription) => subscription.close,
+                );
+                delegationMode = yield* readDelegationMode;
+                existing = (yield* Ref.get(sessions)).get(key);
+              }
               if (existing !== undefined) {
                 const attached = existing.attachedThreadIds.has(input.threadId);
                 if (!attached && !existing.supportsMultipleProviderThreads) {
@@ -2226,7 +2282,7 @@ export const layerWithOptions = (
                   threadId: input.threadId,
                   providerSessionId: input.providerSessionId,
                   modelSelection: input.modelSelection,
-                  runtimePolicy: input.runtimePolicy,
+                  runtimePolicy: { ...input.runtimePolicy, delegationMode },
                   ...(input.resumeFromSession === undefined
                     ? {}
                     : { resumeFromSession: input.resumeFromSession }),
@@ -2285,6 +2341,7 @@ export const layerWithOptions = (
               const exposedRuntime = decorateRuntime(runtime, eventSubscribers);
               const now = yield* Clock.currentTimeMillis;
               const entry: LiveSessionEntry = {
+                delegationMode,
                 attachedThreadIds: new Set([input.threadId]),
                 loadedProviderThreadKeyByThread: new Map(),
                 mcpCredentialIdByThread:

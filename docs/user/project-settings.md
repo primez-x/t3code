@@ -46,6 +46,24 @@ Settings that are environment-wide stay read-only while a project is selected. W
 targets disagree, a control shows **Mixed** until you choose one value. Appearance, keyboard,
 and other phone-only settings ignore the filter.
 
+## Delegation
+
+Open **Settings → General → Behavior** on web or desktop.
+On mobile, open **Settings → Thread behavior**.
+Select environments to change delegation settings. Projects cannot override delegation settings.
+
+**Native preferred** uses provider-native subagents when supported. T3 handles other assignments.
+**T3 managed** lets T3 select each delegated provider, model, and effort, and control native subagent launches.
+Both modes follow the same capability, cost, available usage, and Advisor rules. T3 managed enforces those rules. Native preferred relies on agent instructions.
+
+Enable **Usage balance** to favor capable models with more usage available.
+When disabled, remaining usage does not rank choices. Exhausted models remain excluded.
+Enable **Model diversity** to favor another provider or model when usage is comparable or unknown.
+When disabled, choose by capability, usage, and cost.
+
+Changes apply to new delegated tasks and turns after the agent session refreshes.
+The root model stays unchanged.
+
 ## Worktree branch names
 
 In **Settings → Source Control → Worktree branch naming**, choose a static prefix,

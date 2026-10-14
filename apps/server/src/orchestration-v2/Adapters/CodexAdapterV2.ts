@@ -1,3 +1,8 @@
+import * as ProviderHost from "@t3tools/provider-core/server/ProviderHost";
+import {
+  t3DelegationInstructions,
+  type T3DelegationMode,
+} from "@t3tools/provider-core/server/orchestrationInstructions";
 import { revertCodexThread } from "../../provider/CodexThreadRevert.ts";
 import { historyResponseItems } from "@t3tools/provider-core/server/handoffBudget";
 import { makeProviderTextDeltaCoalescer } from "./ProviderTextDeltaCoalescer.ts";
@@ -723,6 +728,7 @@ export function buildCodexTurnStartParams(input: {
   readonly runtimePolicy: ProviderAdapter.ProviderAdapterV2RuntimePolicy;
   readonly modelSelection: ModelSelection;
   readonly hasT3Mcp?: boolean;
+  readonly delegationMode?: T3DelegationMode;
   readonly browserToolsAvailable?: boolean;
   readonly deviceToolsAvailable?: boolean;
   /** ChatGPT token sharing does not accept service tiers. */
@@ -771,8 +777,16 @@ export function buildCodexTurnStartParams(input: {
               browser: input.browserToolsAvailable ?? true,
               device: input.deviceToolsAvailable ?? false,
             },
+            input.delegationMode,
           )
-        : undefined;
+        : input.delegationMode === "t3-managed"
+          ? {
+              t3_code_delegation: {
+                kind: "application" as const,
+                value: t3DelegationInstructions(input.delegationMode, false),
+              },
+            }
+          : undefined;
     const additionalContext =
       t3Context === undefined && Object.keys(appContext).length === 0
         ? undefined
@@ -1295,6 +1309,7 @@ export interface CodexAppServerClientFactoryShape {
     readonly providerSessionId: OrchestrationV2ProviderSession["id"];
     readonly runtimePolicy: ProviderAdapter.ProviderAdapterV2RuntimePolicy;
     readonly settings: CodexSettings;
+    readonly delegationMode?: T3DelegationMode;
     readonly environment: NodeJS.ProcessEnv;
   }) => Effect.Effect<
     CodexClient.CodexAppServerClient["Service"],
@@ -1545,6 +1560,7 @@ export const layerAppServerClientFactory: Layer.Layer<
             command: input.settings.binaryPath || "codex",
             args: codexAppServerArgs(
               resolveCodexLaunchArgs(input.settings.launchArgs, input.environment),
+              input.delegationMode,
             ),
             env: environment,
             threadId: input.threadId,
@@ -1711,6 +1727,20 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
   adapterOptions: CodexAdapterV2Options,
 ) {
   const mcpSessions = yield* McpProviderSessions.McpProviderSessions;
+  const providerHost = yield* Effect.serviceOption(ProviderHost.ProviderHost);
+  const readDelegationMode = Option.isSome(providerHost)
+    ? providerHost.value.settings.get.pipe(
+        Effect.map((settings) => settings.delegationPolicy.mode),
+        Effect.mapError(
+          (cause) =>
+            new ProviderAdapter.ProviderAdapterProtocolError({
+              driver: CODEX_PROVIDER,
+              detail: "Cannot read delegation policy",
+              payload: cause,
+            }),
+        ),
+      )
+    : Effect.succeed("native-preferred" as const);
   const readMcpSession = (threadId: ThreadId | null) =>
     threadId === null ? Effect.succeed(undefined) : mcpSessions.read(threadId);
   const { clientFactory, crypto, fileSystem, idAllocator, serverConfig } = adapterOptions;
@@ -1737,12 +1767,14 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                     }),
                 ),
               );
+        const delegationMode = input.runtimePolicy.delegationMode ?? (yield* readDelegationMode);
         const client = yield* clientFactory.open({
           instanceId: adapterOptions.instanceId,
           threadId: input.threadId,
           providerSessionId: input.providerSessionId,
           runtimePolicy: input.runtimePolicy,
           settings: resolvedRuntime?.config ?? adapterOptions.settings,
+          delegationMode,
           environment: resolvedRuntime?.environment ?? adapterOptions.environment,
         });
         const additionalContextByThread = yield* Ref.make(
@@ -6203,6 +6235,11 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
           codexInput: ReadonlyArray<CodexSchema.V2TurnStartParams__UserInput>,
         ) =>
           Effect.gen(function* () {
+            if ((yield* readDelegationMode) !== delegationMode) {
+              return yield* toProtocolError(
+                "Delegation policy changed after the session refresh; retry the turn to reopen the session.",
+              );
+            }
             const threadId = yield* getNativeThreadId(turnInput.providerThread);
             const mcpSession = yield* mcpSessions.read(turnInput.threadId);
             const turnStartParams = yield* buildCodexTurnStartParams({
@@ -6211,6 +6248,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
               runtimePolicy: turnInput.runtimePolicy,
               modelSelection: turnInput.modelSelection,
               hasT3Mcp: mcpSession !== undefined,
+              delegationMode,
               browserToolsAvailable: mcpSession?.browserToolsAvailable ?? true,
               deviceToolsAvailable: mcpSession?.capabilities?.has("device") ?? false,
               omitServiceTier: adapterOptions.resolveRuntime !== undefined,

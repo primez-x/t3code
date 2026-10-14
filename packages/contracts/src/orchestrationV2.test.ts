@@ -645,6 +645,8 @@ describe("orchestration V2 contracts", () => {
       parentNodeId: "node-parent-1",
       task: "Inspect the API boundary.",
       title: "API inspection",
+      capability: "discovery",
+      role: "advice",
       modelSelection: {
         instanceId: "claudeAgent",
         model: "claude-sonnet-4-6",
@@ -660,6 +662,8 @@ describe("orchestration V2 contracts", () => {
     expect(command.parentThreadId).toBe(ThreadId.make("thread-parent-1"));
     expect(command.parentRunId).toBe(RunId.make("run-parent-1"));
     expect(command.parentNodeId).toBe(NodeId.make("node-parent-1"));
+    expect(command.capability).toBe("discovery");
+    expect(command.role).toBe("advice");
   });
 
   it("decodes delegated task wake-policy commands", () => {

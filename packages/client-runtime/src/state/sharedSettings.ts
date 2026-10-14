@@ -30,6 +30,7 @@ const SHARED_SERVER_SETTING_KEYS = [
   "newWorktreesStartFromOrigin",
   "sourceControlWritingStyle",
   "textGenerationModelSelection",
+  "delegationPolicy",
 ] as const satisfies ReadonlyArray<keyof ServerSettings & keyof ServerSettingsPatch>;
 
 export type SharedServerSettingKey = (typeof SHARED_SERVER_SETTING_KEYS)[number];
@@ -92,7 +93,14 @@ export function pickSharedServerSettings(
   capabilities?: Pick<ExecutionEnvironmentCapabilities, "threadRestartContinuation">,
 ): ServerSettingsPatch {
   return filterSharedServerPatch(
-    Struct.pick(settings, SHARED_SERVER_SETTING_KEYS),
+    {
+      ...Struct.pick(settings, SHARED_SERVER_SETTING_KEYS),
+      delegationPolicy: Struct.pick(settings.delegationPolicy, [
+        "mode",
+        "balanceUsage",
+        "preferAlternateProvider",
+      ]),
+    },
     capabilities,
     settings,
   );

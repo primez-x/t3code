@@ -41,6 +41,11 @@ import * as Stream from "effect/Stream";
 import * as ProviderHost from "@t3tools/provider-core/server/ProviderHost";
 import * as McpProviderSession from "@t3tools/provider-core/server/mcpSession";
 import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
+import {
+  T3_CODE_ORCHESTRATION_INSTRUCTIONS,
+  t3DelegationInstructions,
+  type T3DelegationMode,
+} from "@t3tools/provider-core/server/orchestrationInstructions";
 import { buildRuntimeInstructions } from "@t3tools/provider-core/server/runtimeInstructions";
 import { museModelCapabilities, resolveMuseReasoningEffort } from "./modelCatalog.ts";
 import {
@@ -68,6 +73,8 @@ import {
   type createMuseSdkHost,
   type MuseSdkHost,
 } from "./sdk.ts";
+import { museSubscriptionUsageToUpdate } from "./usageLimits.ts";
+import type { ManagedServerProvider } from "@t3tools/provider-core/server/snapshot";
 import type * as ProviderEventLoggers from "@t3tools/provider-core/server/ProviderEventLoggers";
 import {
   providerMessageTextWithAttachmentPaths,
@@ -193,6 +200,7 @@ export interface MuseAdapterV2Options {
   readonly environment: NodeJS.ProcessEnv;
   readonly modelCatalog?: Effect.Effect<ReadonlyArray<ServerProviderModel>>;
   readonly createHost?: typeof createMuseSdkHost;
+  readonly onUsageLimits?: ManagedServerProvider["applyUsageLimits"];
   readonly requestTimeoutMs?: number;
   readonly nativeEventLogger?: ProviderEventLoggers.EventNdjsonLogger;
   /** Where a turn Muse starts on its own (a finished workflow's report) asks for its run. */
@@ -327,6 +335,7 @@ export const makeMuseAdapterV2 = Effect.fn("makeMuseAdapterV2")(function* (
       const commands = yield* Semaphore.make(1);
       const eventPermit = yield* Semaphore.make(1);
       let host: MuseSdkHost;
+      let delegationMode: T3DelegationMode = "native-preferred";
       let hostEpoch = 0;
       let closed = false;
       let broken = false;
@@ -1283,7 +1292,12 @@ export const makeMuseAdapterV2 = Effect.fn("makeMuseAdapterV2")(function* (
           }
         }
       });
+      const applyUsageLimits = (data: unknown) => {
+        const update = museSubscriptionUsageToUpdate(data);
+        return update && options.onUsageLimits ? options.onUsageLimits(update) : Effect.void;
+      };
       const handleNotification = Effect.fnUntraced(function* (method: string, data: unknown) {
+        if (method === "usage/changed") return yield* applyUsageLimits(data);
         const params = yield* decode(recordSchema, data);
         if (params.sessionId !== nativeSessionId) return;
         if (method === "view/gap")
@@ -1646,7 +1660,12 @@ export const makeMuseAdapterV2 = Effect.fn("makeMuseAdapterV2")(function* (
         ),
         Effect.forkIn(scope),
       );
-      const launchHost = Effect.fnUntraced(function* () {
+      const launchHost = Effect.fnUntraced(function* (launchMode?: T3DelegationMode) {
+        delegationMode =
+          launchMode ??
+          (yield* providerHost.settings.get.pipe(
+            Effect.mapError((cause) => protocolError("Cannot read delegation policy", cause)),
+          )).delegationPolicy.mode;
         const epoch = ++hostEpoch;
         const mcpSession = yield* mcpSessions.read(input.threadId);
         const environment = McpProviderSession.withAgentDeviceEnvironment(
@@ -1668,6 +1687,7 @@ export const makeMuseAdapterV2 = Effect.fn("makeMuseAdapterV2")(function* (
               cwd,
               environment,
               runtimeMode: input.runtimePolicy.runtimeMode,
+              delegationMode,
             },
             options.createHost,
           ).pipe(
@@ -1709,6 +1729,13 @@ export const makeMuseAdapterV2 = Effect.fn("makeMuseAdapterV2")(function* (
             return {};
           throw new Error(`Unsupported Muse server request: ${request.method}`);
         });
+        if (options.onUsageLimits) {
+          yield* Effect.tryPromise(() => created.connection.request("usage/read", {})).pipe(
+            Effect.timeout(options.requestTimeoutMs ?? 30_000),
+            Effect.flatMap(applyUsageLimits),
+            Effect.ignore,
+          );
+        }
         void created.connection.closed.then(() => {
           if (!closed && epoch === hostEpoch)
             Queue.offerUnsafe(inbox, {
@@ -1743,7 +1770,7 @@ export const makeMuseAdapterV2 = Effect.fn("makeMuseAdapterV2")(function* (
           yield* Queue.shutdown(events);
         }).pipe(eventPermit.withPermits(1)),
       );
-      yield* launchHost();
+      yield* launchHost(input.runtimePolicy.delegationMode);
 
       const register = Effect.fnUntraced(function* (
         args: ProviderAdapter.ProviderAdapterV2EnsureThreadInput,
@@ -1925,6 +1952,33 @@ export const makeMuseAdapterV2 = Effect.fn("makeMuseAdapterV2")(function* (
           return yield* protocolError("Muse does not support dedicated Plan mode");
         if (turnInput.runtimePolicy.runtimeMode !== input.runtimePolicy.runtimeMode)
           return yield* protocolError("Runtime policy changes require a fresh Muse host");
+        const currentDelegationMode = (yield* providerHost.settings.get.pipe(
+          Effect.mapError((cause) => protocolError("Cannot read delegation policy", cause)),
+        )).delegationPolicy.mode;
+        if (currentDelegationMode !== delegationMode) {
+          if (observedChildren.size > 0 || wake !== undefined) {
+            return yield* protocolError(
+              "Delegation policy refresh must wait for Muse background work",
+            );
+          }
+          hostEpoch++;
+          yield* Effect.tryPromise(() => host.close()).pipe(
+            Effect.mapError((cause) =>
+              protocolError("Cannot replace Muse host after delegation policy change", cause),
+            ),
+          );
+          yield* settleObservedChildren("cancelled");
+          wake = undefined;
+          yield* launchHost();
+          yield* request("session/resume", { excludeItems: true }).pipe(
+            Effect.flatMap((value) => decode(MuseSessionResult, value)),
+            Effect.flatMap((result) =>
+              result.session.sessionId === nativeSessionId
+                ? Effect.void
+                : protocolError("Muse resumed a different session identity"),
+            ),
+          );
+        }
         // A continuation run takes the turn Muse already started; it sends no prompt.
         const continuation =
           turnInput.message.createdBy === "agent" &&
@@ -2014,17 +2068,21 @@ export const makeMuseAdapterV2 = Effect.fn("makeMuseAdapterV2")(function* (
                 `Muse returned an unsupported compaction status: ${result.status}`,
               );
           } else {
+            const hasT3Mcp = (yield* mcpSessions.read(turnInput.threadId)) !== undefined;
             const result = yield* request(
               "turn/start",
               {
                 input: [
                   {
                     type: "text",
-                    text: buildRuntimeInstructions({
-                      harness: "Muse Code",
-                      model: session.model ?? undefined,
-                      reasoningEffort: effort,
-                    }),
+                    text:
+                      t3DelegationInstructions(delegationMode, hasT3Mcp) +
+                      (hasT3Mcp ? T3_CODE_ORCHESTRATION_INSTRUCTIONS : "") +
+                      buildRuntimeInstructions({
+                        harness: "Muse Code",
+                        model: session.model ?? undefined,
+                        reasoningEffort: effort,
+                      }),
                   },
                   ...parts,
                 ],

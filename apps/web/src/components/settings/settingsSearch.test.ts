@@ -295,7 +295,10 @@ describe("searchSettings", () => {
 
   it("ranks keybinding commands after other settings", () => {
     const ids = searchSettings("model").map((item) => item.id);
-    expect(ids[0]).toBe("default-model");
+    expect(ids).toContain("default-model");
+    expect(ids.indexOf("keybinding-modelPicker.toggle")).toBeGreaterThan(
+      ids.indexOf("default-model"),
+    );
     expect(ids.indexOf("keybinding-modelPicker.toggle")).toBeGreaterThan(
       ids.indexOf("text-generation-model"),
     );
@@ -312,6 +315,18 @@ describe("searchSettings", () => {
   it("keeps catalog result ids unique", () => {
     const ids = SETTINGS_SEARCH_ITEMS.map((item) => item.id);
     expect(new Set(ids).size).toBe(ids.length);
+  });
+
+  it.each([
+    ["native preferred", "delegation-mode"],
+    ["delegation usage balance", "delegation-usage-balance"],
+    ["delegation model diversity", "delegation-model-diversity"],
+  ])("finds the environment delegation control for %s", (query, id) => {
+    expect(searchSettings(query)[0]).toMatchObject({
+      id,
+      to: "/settings/general",
+      scope: "environment-defaults",
+    });
   });
 
   it("serves anchor props to panels from the catalog", () => {

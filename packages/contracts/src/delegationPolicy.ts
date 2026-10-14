@@ -1,0 +1,78 @@
+import * as Effect from "effect/Effect";
+import * as Schema from "effect/Schema";
+import { IsoDateTime, TrimmedNonEmptyString } from "./baseSchemas.ts";
+import { ProviderDriverKind } from "./providerInstance.ts";
+
+export const DelegationMode = Schema.Literals(["native-preferred", "t3-managed"]);
+export type DelegationMode = typeof DelegationMode.Type;
+
+export const DelegationCapability = Schema.Literals([
+  "lookup",
+  "discovery",
+  "mechanical",
+  "routine",
+  "coding",
+  "substantial",
+  "architecture",
+]).annotate({
+  description:
+    "Required task floor. lookup: exact fact. discovery: bounded research or classification. mechanical: a decided edit with a deterministic check. routine: bounded implementation. coding: terminal code or workflow work. substantial: larger implementation. architecture: difficult diagnosis, design, advice, or independent review. Mechanical and routine tasks can use capable Haiku routes. Advice and review always require architecture. Defaults: research discovery; implementation/test coding; design/advice/review architecture; general routine.",
+});
+export type DelegationCapability = typeof DelegationCapability.Type;
+
+export const DelegationTaskRole = Schema.Literals([
+  "implementation",
+  "research",
+  "review",
+  "design",
+  "test",
+  "general",
+  "advice",
+]);
+export type DelegationTaskRole = typeof DelegationTaskRole.Type;
+
+export const DelegationModelRoute = Schema.Struct({
+  driver: ProviderDriverKind,
+  model: TrimmedNonEmptyString,
+  effort: Schema.Literals(["low", "medium", "high", "xhigh"]),
+  capabilities: Schema.Array(DelegationCapability),
+  costPerTask: Schema.Number.check(Schema.isFinite(), Schema.isGreaterThanOrEqualTo(0)),
+});
+export type DelegationModelRoute = typeof DelegationModelRoute.Type;
+
+export const DelegationPolicy = Schema.Struct({
+  version: Schema.Literal(1).pipe(Schema.withDecodingDefault(Effect.succeed(1 as const))),
+  mode: DelegationMode.pipe(
+    Schema.withDecodingDefault(Effect.succeed("native-preferred" as const)),
+  ),
+  balanceUsage: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
+  preferAlternateProvider: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
+  routes: Schema.Array(DelegationModelRoute).pipe(Schema.withDecodingDefault(Effect.succeed([]))),
+});
+export type DelegationPolicy = typeof DelegationPolicy.Type;
+
+export const DelegationPolicyPatch = Schema.Struct({
+  version: Schema.optionalKey(Schema.Literal(1)),
+  mode: Schema.optionalKey(DelegationMode),
+  balanceUsage: Schema.optionalKey(Schema.Boolean),
+  preferAlternateProvider: Schema.optionalKey(Schema.Boolean),
+  routes: Schema.optionalKey(Schema.Array(DelegationModelRoute)),
+});
+export type DelegationPolicyPatch = typeof DelegationPolicyPatch.Type;
+
+export const DelegationRoutingDecision = Schema.Struct({
+  policyVersion: Schema.Literal(1),
+  capability: DelegationCapability,
+  role: DelegationTaskRole,
+  reason: Schema.Literals([
+    "advisor-fable",
+    "advisor-fallback",
+    "headroom",
+    "alternate-provider",
+    "alternate-model",
+    "lowest-cost",
+  ]),
+  headroomPercent: Schema.NullOr(Schema.Number),
+  usageCheckedAt: Schema.NullOr(IsoDateTime),
+});
+export type DelegationRoutingDecision = typeof DelegationRoutingDecision.Type;

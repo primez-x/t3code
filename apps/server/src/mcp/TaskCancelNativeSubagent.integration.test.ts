@@ -145,6 +145,10 @@ it.effect("task_cancel ends a delegated child's background native subagent", () 
         ThreadManagementService.layer.pipe(
           Layer.provide(layerOrchestrator),
           Layer.provide(ServerSettings.layerTest()),
+          Layer.provide(layerAdapters),
+          Layer.provide(
+            Layer.mock(ProviderRegistry.ProviderRegistry)({ getProviders: Effect.succeed([]) }),
+          ),
           Layer.provide(
             CommandReceiptStore.layer.pipe(Layer.provide(SqlitePersistence.layerMemory)),
           ),

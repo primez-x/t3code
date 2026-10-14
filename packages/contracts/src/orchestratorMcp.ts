@@ -1,3 +1,9 @@
+import {
+  DelegationCapability,
+  DelegationPolicy,
+  DelegationRoutingDecision,
+  DelegationTaskRole,
+} from "./delegationPolicy.ts";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import * as SchemaTransformation from "effect/SchemaTransformation";
@@ -110,7 +116,8 @@ export const OrchestratorMcpTarget = Schema.Struct({
   ),
   model: Schema.optional(
     TrimmedNonEmptyString.annotate({
-      description: "Model id advertised for the selected provider instance.",
+      description:
+        "Advertised model id. Delegation also requires a configured route with a supported task floor. The built-in routes cover mapped Codex, Claude, and Muse models. Custom models require configured routes; missing costs or capabilities are never inferred.",
     }),
   ),
   /**
@@ -137,14 +144,7 @@ export const OrchestratorMcpInteractionMode = Schema.Union([
 ]);
 export type OrchestratorMcpInteractionMode = typeof OrchestratorMcpInteractionMode.Type;
 
-export const OrchestratorMcpTaskRole = Schema.Literals([
-  "implementation",
-  "research",
-  "review",
-  "design",
-  "test",
-  "general",
-]);
+export const OrchestratorMcpTaskRole = DelegationTaskRole;
 export type OrchestratorMcpTaskRole = typeof OrchestratorMcpTaskRole.Type;
 
 export const OrchestratorMcpDelegatedTaskStatus = Schema.Literals([
@@ -174,6 +174,7 @@ export const OrchestratorMcpDelegateTaskInput = Schema.Struct({
   target: Schema.optional(OrchestratorMcpTarget),
   title: Schema.optional(OrchestratorMcpTitle),
   role: Schema.optional(OrchestratorMcpTaskRole),
+  capability: Schema.optional(DelegationCapability),
   isolation: Schema.optional(
     Schema.Literals(["shared", "worktree"]).annotate({
       description:
@@ -202,6 +203,7 @@ export const OrchestratorMcpDelegateTaskInput = Schema.Struct({
 export type OrchestratorMcpDelegateTaskInput = typeof OrchestratorMcpDelegateTaskInput.Type;
 
 export const OrchestratorMcpDelegateTaskResult = Schema.Struct({
+  routingDecision: Schema.optional(DelegationRoutingDecision),
   taskId: NodeId,
   childThreadId: ThreadId,
   childRunId: Schema.NullOr(RunId),
@@ -508,6 +510,8 @@ export const OrchestratorMcpProviderCapability = Schema.Struct({
 export type OrchestratorMcpProviderCapability = typeof OrchestratorMcpProviderCapability.Type;
 
 export const OrchestratorMcpCapabilitiesResult = Schema.Struct({
+  delegationPolicy: Schema.optional(DelegationPolicy),
+  delegationConstraints: Schema.optional(Schema.Array(Schema.String)),
   /** The calling thread, or null when the caller is not a T3 thread. */
   parentThreadId: Schema.NullOr(ThreadId),
   /** The calling thread's selection, or null when the caller is not a T3 thread. */

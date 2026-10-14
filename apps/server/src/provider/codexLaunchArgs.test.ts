@@ -43,6 +43,78 @@ describe("codexAppServerArgs", () => {
   });
 });
 
+describe("Codex managed delegation", () => {
+  it("removes native feature enables before appending config denials", () => {
+    NodeAssert.deepStrictEqual(
+      codexAppServerArgs("--enable multi_agent -c features.multi_agent_v2=true", "t3-managed"),
+      [
+        "app-server",
+        "-c",
+        "features.multi_agent_v2=true",
+        "-c",
+        "features.multi_agent=false",
+        "-c",
+        "features.multi_agent_v2=false",
+      ],
+    );
+  });
+
+  it.each([
+    ["--enable multi_agent", []],
+    ["--enable=multi_agent_v2", []],
+    [
+      "--enable multi_agent --enable multi_agent_v2 --enable shell_tool",
+      ["--enable", "shell_tool"],
+    ],
+    [
+      "--enable multi_agent,shell_tool,multi_agent_v2",
+      ["--enable", "multi_agent,shell_tool,multi_agent_v2"],
+    ],
+    ["--enable=shell_tool,multi_agent_v2,js_repl", ["--enable=shell_tool,multi_agent_v2,js_repl"]],
+    [
+      "--disable multi_agent --enable shell_tool",
+      ["--disable", "multi_agent", "--enable", "shell_tool"],
+    ],
+  ])(
+    "blocks native agent enables and preserves unrelated feature controls: %s",
+    (launchArgs, preserved) => {
+      NodeAssert.deepStrictEqual(codexAppServerArgs(launchArgs as string, "t3-managed"), [
+        "app-server",
+        ...preserved,
+        "-c",
+        "features.multi_agent=false",
+        "-c",
+        "features.multi_agent_v2=false",
+      ]);
+    },
+  );
+
+  it("preserves explicit native feature enables in native-preferred mode", () => {
+    NodeAssert.deepStrictEqual(
+      codexAppServerArgs(
+        "--enable=multi_agent --enable multi_agent_v2 --enable shell_tool",
+        "native-preferred",
+      ),
+      [
+        "app-server",
+        "--enable=multi_agent",
+        "--enable",
+        "multi_agent_v2",
+        "--enable",
+        "shell_tool",
+      ],
+    );
+  });
+
+  it("preserves caller controls in native-preferred mode", () => {
+    NodeAssert.deepStrictEqual(codexAppServerArgs("--disable multi_agent", "native-preferred"), [
+      "app-server",
+      "--disable",
+      "multi_agent",
+    ]);
+  });
+});
+
 describe("codexExecLaunchArgs", () => {
   it("keeps shared codex flags and omits app-server-only flags", () => {
     NodeAssert.deepStrictEqual(

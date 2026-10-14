@@ -1,3 +1,4 @@
+import { makeDelegationFixtures } from "./testkit/DelegationFixtures.ts";
 import { assert, it } from "@effect/vitest";
 import {
   CommandId,
@@ -39,6 +40,9 @@ import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAda
 
 const instanceId = ProviderInstanceId.make("codex");
 const modelSelection = { instanceId, model: "gpt-5.1-codex" };
+const delegationFixtures = makeDelegationFixtures([
+  { ...modelSelection, driver: ProviderDriverKind.make("codex") },
+]);
 const adapter = {
   instanceId,
   driver: ProviderDriverKind.make("codex"),
@@ -49,6 +53,8 @@ const adapter = {
 const layerDatabase = SqlitePersistence.layerMemory;
 // No effect worker: runs stay unstarted, so Stop ends them without a provider.
 const layerTest = ThreadManagementService.layer.pipe(
+  Layer.provide(ProviderAdapterRegistry.layerFromAdapters([adapter])),
+  Layer.provide(delegationFixtures.layerRegistry),
   Layer.provideMerge(
     Layer.mergeAll(
       layerDatabase,

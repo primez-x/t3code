@@ -140,7 +140,12 @@ import {
 } from "../../provider/claudeUsageLimits.ts";
 import type { ManagedServerProvider } from "@t3tools/provider-core/server/snapshot";
 import { mergeProviderInstanceEnvironment } from "@t3tools/provider-core/server/instanceEnvironment";
-import { T3_CODE_ORCHESTRATION_INSTRUCTIONS } from "@t3tools/provider-core/server/orchestrationInstructions";
+import * as ProviderHost from "@t3tools/provider-core/server/ProviderHost";
+import {
+  T3_CODE_ORCHESTRATION_INSTRUCTIONS,
+  t3DelegationInstructions,
+  type T3DelegationMode,
+} from "@t3tools/provider-core/server/orchestrationInstructions";
 import { buildRuntimeInstructions } from "@t3tools/provider-core/server/runtimeInstructions";
 import {
   mcpToolPresentation,
@@ -359,6 +364,8 @@ export const ClaudeProviderCapabilitiesV2 = {
     enforcement: "native",
   },
 } satisfies OrchestrationV2ProviderCapabilities;
+
+const CLAUDE_NATIVE_AGENT_TOOLS: ReadonlyArray<string> = ["Agent", "Task", "Workflow"];
 
 const CLAUDE_CODE_PRESET_TOOLS = {
   type: "preset",
@@ -1075,6 +1082,7 @@ export function makeClaudeQueryOptions(input: {
   readonly tools?: ClaudeAgentSdkQueryTools;
   readonly allowedTools?: ReadonlyArray<string>;
   readonly disallowedTools?: ReadonlyArray<string>;
+  readonly delegationMode?: T3DelegationMode;
   readonly permissionMode?: PermissionMode;
   readonly canUseTool?: CanUseTool;
   readonly onUserDialog?: ClaudeQueryOptions["onUserDialog"];
@@ -1087,6 +1095,23 @@ export function makeClaudeQueryOptions(input: {
     "dangerously-skip-permissions": launchArgSkipPermissions,
     ...extraArgs
   } = input.settings === undefined ? {} : parseCliArgs(input.settings.launchArgs).flags;
+  const managedDelegation = input.delegationMode === "t3-managed";
+  const hasT3Mcp = input.mcpServers?.["t3-code"] !== undefined;
+  const disallowedTools = managedDelegation
+    ? [
+        ...new Set([
+          ...(input.disallowedTools ?? []),
+          ...[extraArgs["disallowedTools"], extraArgs["disallowed-tools"]].flatMap((value) =>
+            typeof value === "string" ? value.split(/[ ,]+/).filter(Boolean) : [],
+          ),
+          ...CLAUDE_NATIVE_AGENT_TOOLS,
+        ]),
+      ]
+    : input.disallowedTools;
+  if (managedDelegation) {
+    delete extraArgs["disallowedTools"];
+    delete extraArgs["disallowed-tools"];
+  }
   const requestThinkingSummaries =
     compiledSelection.settings.alwaysThinkingEnabled !== false &&
     extraArgs["thinking-display"] !== "omitted";
@@ -1131,7 +1156,7 @@ export function makeClaudeQueryOptions(input: {
     ...threadIdentity,
     ...(input.resumeSessionAt === undefined ? {} : { resumeSessionAt: input.resumeSessionAt }),
     ...(input.allowedTools === undefined ? {} : { allowedTools: [...input.allowedTools] }),
-    ...(input.disallowedTools === undefined ? {} : { disallowedTools: [...input.disallowedTools] }),
+    ...(disallowedTools === undefined ? {} : { disallowedTools: [...disallowedTools] }),
     ...(input.canUseTool === undefined ? {} : { canUseTool: input.canUseTool }),
     ...(input.allowDangerouslySkipPermissions === true
       ? { allowDangerouslySkipPermissions: true }
@@ -1164,7 +1189,8 @@ export function makeClaudeQueryOptions(input: {
       preset: "claude_code" as const,
       append:
         buildRuntimeInstructions({ harness: "Claude Code" }) +
-        (input.mcpServers === undefined ? "" : T3_CODE_ORCHESTRATION_INSTRUCTIONS),
+        (hasT3Mcp ? T3_CODE_ORCHESTRATION_INSTRUCTIONS : "") +
+        t3DelegationInstructions(input.delegationMode ?? "native-preferred", hasT3Mcp),
     },
     ...(Object.keys(extraArgs).length === 0 ? {} : { extraArgs }),
   };
@@ -3464,6 +3490,20 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
   adapterOptions: ClaudeAdapterV2Options,
 ) {
   const mcpSessions = yield* McpProviderSessions.McpProviderSessions;
+  const providerHost = yield* Effect.serviceOption(ProviderHost.ProviderHost);
+  const readDelegationMode = Option.isSome(providerHost)
+    ? providerHost.value.settings.get.pipe(
+        Effect.map((settings) => settings.delegationPolicy.mode),
+        Effect.mapError(
+          (cause) =>
+            new ProviderAdapter.ProviderAdapterProtocolError({
+              driver: CLAUDE_PROVIDER,
+              detail: "Cannot read delegation policy",
+              payload: cause,
+            }),
+        ),
+      )
+    : Effect.succeed("native-preferred" as const);
   const { attachmentsDir, fileSystem, path, crypto, idAllocator, queryRunner } = adapterOptions;
   // Subagent model names and effort levels, including the instance's custom models.
   const subagentModelCatalog = scopeClaudeModelCatalog(
@@ -8109,6 +8149,16 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             } satisfies PermissionResult;
           }
 
+          if (
+            CLAUDE_NATIVE_AGENT_TOOLS.includes(toolName) &&
+            (yield* readDelegationMode) === "t3-managed"
+          ) {
+            return {
+              behavior: "deny",
+              message: "T3-managed delegation requires delegate_task.",
+              toolUseID: callbackOptions.toolUseID,
+            } satisfies PermissionResult;
+          }
           const nativeRequestId = callbackOptions.toolUseID;
           const nativeToolInput = claudeNativeToolInputFromRecord(toolInput);
           // While root output awaits its prompt echo, the tool's streamed
@@ -8446,7 +8496,8 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
               ? {}
               : { allowedTools: queryPolicy.allowedTools }),
           });
-          const queryPolicyKey = claudeEffectiveQueryPolicyKey(queryPolicy, mcpOverrides);
+          const delegationMode = yield* readDelegationMode;
+          const queryPolicyKey = `${claudeEffectiveQueryPolicyKey(queryPolicy, mcpOverrides)}:${delegationMode}`;
           const compiledSelection = compileClaudeModelSelection(turnInput.modelSelection);
           const resumeSessionAt = yield* getNativeConversationHeadId(turnInput.providerThread);
           const existing = yield* Ref.get(queryContext);
@@ -8455,6 +8506,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           if (
             existing !== null &&
             existing.nativeThreadId === nativeThreadId &&
+            existing.queryPolicyKey === queryPolicyKey &&
             isClaudeProviderContinuationTurn(turnInput)
           ) {
             return existing;
@@ -8548,6 +8600,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             cwd: turnInput.runtimePolicy.cwd,
             attachmentsDir,
             settings: adapterOptions.settings,
+            delegationMode,
             environment: adapterOptions.environment,
             tools: queryPolicy.tools ?? CLAUDE_CODE_PRESET_TOOLS,
             ...(mcpOverrides.allowedTools === undefined

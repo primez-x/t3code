@@ -1,3 +1,8 @@
+import {
+  DelegationCapability,
+  DelegationRoutingDecision,
+  DelegationTaskRole,
+} from "./delegationPolicy.ts";
 import { OrchestrationMessageContext } from "./composerContext.ts";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
@@ -760,6 +765,9 @@ export const OrchestrationV2Subagent = Schema.Struct({
   title: Schema.NullOr(Schema.String),
   model: Schema.NullOr(Schema.String),
   modelSelection: Schema.optional(ModelSelection),
+  routingDecision: Schema.optional(DelegationRoutingDecision),
+  delegationRole: Schema.optional(DelegationTaskRole),
+  capability: Schema.optional(DelegationCapability),
   // Parent-wake policy for app-owned tasks: "always" offers a continuation on
   // every terminal (async delegations; queue_after_active sequences it behind
   // a live parent run), "settled_only" offers only when the parent has no
@@ -3110,6 +3118,10 @@ export const OrchestrationV2Command = Schema.Union([
   }),
   Schema.Struct({
     type: Schema.Literal("delegated_task.request"),
+    capability: Schema.optional(DelegationCapability),
+    role: Schema.optional(DelegationTaskRole),
+    delegationTargetExplicit: Schema.optional(Schema.Boolean),
+    routingDecision: Schema.optional(DelegationRoutingDecision),
     ...OrchestrationV2CreationFields,
     commandId: CommandId,
     parentThreadId: ThreadId,

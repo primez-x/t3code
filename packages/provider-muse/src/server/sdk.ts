@@ -47,6 +47,7 @@ export interface MuseSdkHostOptions {
   readonly cwd?: string;
   readonly environment?: NodeJS.ProcessEnv;
   readonly runtimeMode?: RuntimeMode;
+  readonly delegationMode?: "native-preferred" | "t3-managed";
   /** Disables shell and filesystem writes and workspace trust. */
   readonly readOnly?: boolean;
   /** Read-only generation needs durable logging for turn/item notifications (verified through 1.1.1). */
@@ -140,9 +141,15 @@ export function museApprovalMode(runtimeMode: RuntimeMode) {
 
 /** The `muse serve` arguments for a host: read-only hosts get no shell, writes, or workspace trust. */
 export function museServeArgs(
-  options: Pick<MuseSdkHostOptions, "readOnly" | "sessionLogging" | "runtimeMode">,
+  options: Pick<
+    MuseSdkHostOptions,
+    "readOnly" | "sessionLogging" | "runtimeMode" | "delegationMode"
+  >,
 ) {
   const args = ["serve"];
+  if (options.delegationMode === "t3-managed") {
+    args.push("-c", 'run.subagent_delegation_mode="off"', "-c", "agents.execution_capacity=1");
+  }
   if (options.readOnly) {
     args.push("--disable-shell", "--disable-write");
     if (options.sessionLogging !== true) args.push("--no-session-log");

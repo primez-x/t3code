@@ -1,3 +1,4 @@
+import * as TestProviderHost from "@t3tools/provider-testing/TestProviderHost";
 import * as NodeOS from "node:os";
 
 import { historyResponseItems } from "@t3tools/provider-core/server/handoffBudget";
@@ -10,6 +11,7 @@ import {
   CommandId,
   CheckpointId,
   CodexSettings,
+  DEFAULT_SERVER_SETTINGS,
   EnvironmentId,
   MessageId,
   type ModelSelection,
@@ -486,6 +488,28 @@ describe("CodexAdapterV2 runtime policy", () => {
         value: "Filtered to overdue",
       });
       assert.isDefined(withT3.additionalContext?.["t3_code_runtime"]);
+    }),
+  );
+
+  it.effect("injects managed delegation policy without an attached MCP server", () =>
+    Effect.gen(function* () {
+      const params = yield* CodexAdapterV2.buildCodexTurnStartParams({
+        nativeThreadId: "managed-no-mcp",
+        codexInput: [{ type: "text", text: "Inspect the repository" }],
+        runtimePolicy: { runtimeMode: "full-access", interactionMode: "default", cwd: null },
+        modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5.4" },
+        hasT3Mcp: false,
+        delegationMode: "t3-managed",
+      });
+      assert.include(
+        params.additionalContext?.t3_code_delegation?.value ?? "",
+        "Native agent launches are disabled",
+      );
+      assert.include(
+        params.additionalContext?.t3_code_delegation?.value ?? "",
+        "T3 delegation tools are not attached",
+      );
+      assert.isUndefined(params.additionalContext?.t3_code_orchestration);
     }),
   );
 
@@ -1765,6 +1789,7 @@ describe("CodexAdapterV2 session initialize", () => {
         beforeEmitInbound === undefined ? {} : { beforeEmitInbound },
       );
       let initializeRequests = 0;
+      const launchModes: unknown[] = [];
       const adapter = yield* CodexAdapterV2.makeCodexAdapterV2({
         instanceId: CodexAdapterV2.CODEX_DEFAULT_INSTANCE_ID,
         settings: DEFAULT_CODEX_SETTINGS,
@@ -1774,6 +1799,11 @@ describe("CodexAdapterV2 session initialize", () => {
             Layer.build(CodexReplay.layerReplayWithDriver(driver)).pipe(
               Effect.flatMap((context) =>
                 Effect.service(CodexClient.CodexAppServerClient).pipe(Effect.provide(context)),
+              ),
+              Effect.tap(() =>
+                Effect.sync(() => {
+                  launchModes.push(openInput.delegationMode);
+                }),
               ),
               Effect.map(
                 (client) =>
@@ -1814,11 +1844,84 @@ describe("CodexAdapterV2 session initialize", () => {
             runtimePolicy: CODEX_TEST_RUNTIME_POLICY,
           }),
         initializeRequests: () => initializeRequests,
+        runtime,
+        launchModes,
       };
     });
 
   const replayPreamble = (nativeThreadId: string) =>
     codexReplayPreamble({ nativeThreadId, nativeTurnId: "unused", prompt: "unused" });
+
+  it.effect("denies Codex start when settings change after manager session refresh", () =>
+    Effect.gen(function* () {
+      const session = yield* openReplaySession(
+        makeCodexReplayTranscript({
+          scenario: "policy-start-race",
+          entries: replayPreamble("policy-race-native").slice(0, 5),
+        }),
+      );
+      const providerThread = yield* session.ensureThread("policy-race-thread");
+      yield* (yield* TestProviderHost.TestProviderHostSettings).set({
+        ...DEFAULT_SERVER_SETTINGS,
+        delegationPolicy: { ...DEFAULT_SERVER_SETTINGS.delegationPolicy, mode: "t3-managed" },
+      });
+      const rejected = yield* session.runtime
+        .startTurn(
+          makeCodexTestTurnInput({
+            threadId: ThreadId.make("policy-race-thread"),
+            providerThread,
+            now: yield* DateTime.now,
+            attemptId: RunAttemptId.make("policy-race-attempt"),
+            text: "Inspect the repository",
+          }),
+        )
+        .pipe(Effect.result);
+      assert.equal(rejected._tag, "Failure");
+      if (rejected._tag === "Failure")
+        assert.include(String(rejected.failure.cause), "Delegation policy changed");
+    }).pipe(
+      Effect.scoped,
+      Effect.provide(
+        Layer.mergeAll(
+          IdAllocator.layer,
+          McpProviderSessions.layer,
+          NodeServices.layer,
+          TestProviderHost.layer().pipe(Layer.provide(NodeServices.layer)),
+        ),
+      ),
+    ),
+  );
+
+  it.effect("passes managed delegation mode to Codex host launch", () =>
+    Effect.gen(function* () {
+      const settings = yield* TestProviderHost.TestProviderHostSettings;
+      yield* settings.set({
+        ...DEFAULT_SERVER_SETTINGS,
+        delegationPolicy: {
+          ...DEFAULT_SERVER_SETTINGS.delegationPolicy,
+          mode: "t3-managed",
+        },
+      });
+      const session = yield* openReplaySession(
+        makeCodexReplayTranscript({
+          scenario: "delegation-policy-host",
+          entries: replayPreamble("policy-native-thread").slice(0, 5),
+        }),
+      );
+      assert.deepEqual(session.launchModes, ["t3-managed"]);
+      yield* session.ensureThread("policy-thread");
+    }).pipe(
+      Effect.scoped,
+      Effect.provide(
+        Layer.mergeAll(
+          IdAllocator.layer,
+          McpProviderSessions.layer,
+          NodeServices.layer,
+          TestProviderHost.layer().pipe(Layer.provide(NodeServices.layer)),
+        ),
+      ),
+    ),
+  );
 
   it.effect("sends one initialize when two threads start on a fresh session at once", () =>
     Effect.gen(function* () {

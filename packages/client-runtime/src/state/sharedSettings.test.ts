@@ -44,6 +44,59 @@ describe("supportsSharedSettingsSync", () => {
 });
 
 describe("splitSharedServerPatch", () => {
+  it("shares delegation controls and detects differences across environments", () => {
+    const patch = { delegationPolicy: { mode: "t3-managed" as const, balanceUsage: false } };
+    expect(splitSharedServerPatch(patch)).toEqual({ sharedPatch: patch, localPatch: {} });
+    const primarySettings = {
+      ...DEFAULT_SERVER_SETTINGS,
+      delegationPolicy: { ...DEFAULT_SERVER_SETTINGS.delegationPolicy, ...patch.delegationPolicy },
+    };
+    expect(pickSharedServerSettings(primarySettings)).toMatchObject(patch);
+    expect(pickSharedServerSettings(primarySettings).delegationPolicy).not.toHaveProperty("routes");
+    expect(
+      findSharedSettingsMismatches({
+        primaryEnvironmentId: primaryId,
+        primarySettings,
+        environments: [
+          {
+            environmentId: boxId,
+            label: "Remote Box",
+            syncEligible: true,
+            settings: {
+              ...primarySettings,
+              delegationPolicy: {
+                ...primarySettings.delegationPolicy,
+                routes: [
+                  {
+                    driver: ProviderDriverKind.make("codex"),
+                    model: "custom",
+                    effort: "low",
+                    capabilities: ["routine"],
+                    costPerTask: 1,
+                  },
+                ],
+              },
+            },
+          },
+        ],
+      }),
+    ).toEqual([]);
+    expect(
+      findSharedSettingsMismatches({
+        primaryEnvironmentId: primaryId,
+        primarySettings,
+        environments: [
+          {
+            environmentId: boxId,
+            label: "Remote Box",
+            syncEligible: true,
+            settings: DEFAULT_SERVER_SETTINGS,
+          },
+        ],
+      }),
+    ).toEqual([{ environmentId: boxId, label: "Remote Box" }]);
+  });
+
   it("keeps project overrides local: project ids belong to one environment", () => {
     const patch = {
       projectSettingsOverrides: { [ProjectId.make("project")]: { defaultAutoPull: true } },
@@ -125,6 +178,7 @@ describe("pickSharedServerSettings", () => {
     ).toEqual([
       "autoResumeLimitedThreads",
       "continueThreadsAfterServerUpdate",
+      "delegationPolicy",
       "newWorktreesStartFromOrigin",
       "sidebarAutoSettleAfterDays",
       "sidebarAutoSettleOnMerge",

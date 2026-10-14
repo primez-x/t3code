@@ -1,3 +1,4 @@
+import * as TestProviderHost from "@t3tools/provider-testing/TestProviderHost";
 // @effect-diagnostics nodeBuiltinImport:off -- workflow fixtures use files and the fake Claude CLI uses Node streams
 import * as NodeEvents from "node:events";
 import * as NodeFS from "node:fs";
@@ -27,6 +28,7 @@ import {
   ChatFileAttachment,
   ChatImageAttachment,
   ClaudeSettings,
+  DEFAULT_SERVER_SETTINGS,
   EnvironmentId,
   MessageId,
   type ModelSelection,
@@ -712,6 +714,88 @@ describe("ClaudeAdapterV2 MCP query overrides", () => {
 });
 
 describe("ClaudeAdapterV2 native protocol logging", () => {
+  it("denies native agent tools in managed mode despite caller overrides", () => {
+    const options = ClaudeAdapterV2.makeClaudeQueryOptions({
+      modelSelection: {
+        instanceId: ProviderInstanceId.make("claudeAgent"),
+        model: "claude-sonnet-4-6",
+      },
+      nativeThreadId: "managed-claude",
+      resume: false,
+      cwd: "/workspace",
+      delegationMode: "t3-managed",
+      disallowedTools: ["WebFetch"],
+      sdkSettings: { enableWorkflows: true },
+      settings: {
+        ...DEFAULT_CLAUDE_SETTINGS,
+        launchArgs: "--allowedTools Agent,Task,Workflow,Bash --disallowedTools WebSearch",
+      },
+    });
+    assert.deepEqual(options.disallowedTools, [
+      "WebFetch",
+      "WebSearch",
+      "Agent",
+      "Task",
+      "Workflow",
+    ]);
+    assert.equal(options.extraArgs?.["disallowedTools"], undefined);
+    assert.include(
+      (options.systemPrompt as { append: string }).append,
+      "Native agent launches are disabled",
+    );
+    const native = ClaudeAdapterV2.makeClaudeQueryOptions({
+      modelSelection: {
+        instanceId: ProviderInstanceId.make("claudeAgent"),
+        model: "claude-sonnet-4-6",
+      },
+      nativeThreadId: "native-claude",
+      resume: false,
+      cwd: null,
+      delegationMode: "native-preferred",
+      disallowedTools: ["WebFetch"],
+      settings: {
+        ...DEFAULT_CLAUDE_SETTINGS,
+        launchArgs: "--allowedTools Agent,Task,Workflow --disallowedTools WebSearch",
+      },
+    });
+    assert.deepEqual(native.disallowedTools, ["WebFetch"]);
+    assert.equal(native.extraArgs?.["allowedTools"], "Agent,Task,Workflow");
+    assert.equal(native.extraArgs?.["disallowedTools"], "WebSearch");
+    assert.notInclude((native.systemPrompt as { append: string }).append, "delegate_task");
+  });
+
+  it.each([undefined, {}, { other: { type: "http", url: "https://example.com/mcp" } }] as const)(
+    "reports missing T3 tools in managed mode and omits unavailable native guidance (%j)",
+    (mcpServers) => {
+      for (const delegationMode of ["t3-managed", "native-preferred"] as const) {
+        const options = ClaudeAdapterV2.makeClaudeQueryOptions({
+          modelSelection: {
+            instanceId: ProviderInstanceId.make("claudeAgent"),
+            model: "claude-sonnet-4-6",
+          },
+          nativeThreadId: "missing-t3-tools",
+          resume: false,
+          cwd: null,
+          delegationMode,
+          ...(mcpServers === undefined ? {} : { mcpServers }),
+        });
+        const instructions = (options.systemPrompt as { append: string }).append;
+        if (delegationMode === "t3-managed") {
+          assert.include(instructions, "T3 delegation tools are not attached");
+          assert.include(instructions, "Report the missing capability");
+          assert.deepEqual(options.disallowedTools, ["Agent", "Task", "Workflow"]);
+        } else {
+          assert.notInclude(instructions, "delegate_task");
+          assert.isUndefined(options.disallowedTools);
+        }
+        assert.notInclude(
+          instructions,
+          "The `t3-code` MCP server provides app-owned orchestration",
+        );
+      }
+    },
+  );
+
   it("injects thread-scoped MCP configuration without logging the credential", () => {
     const threadId = ThreadId.make("thread-claude-mcp");
     const mcpSession = {
@@ -2539,6 +2623,68 @@ describe("ClaudeAdapterV2 background wake turns", () => {
       };
     });
   const makeWakeHarness = makeWakeHarnessWithOptions();
+
+  it.effect("replaces the Claude process for policy changes and denies native callbacks", () =>
+    Effect.gen(function* () {
+      const settings = yield* TestProviderHost.TestProviderHostSettings;
+      const harness = yield* makeWakeHarnessWithOptions({ freshQueueOnReopen: true });
+      const turn = (ordinal: number) =>
+        makeClaudeTestTurnInput({
+          threadId: harness.threadId,
+          providerThread: harness.providerThread,
+          now: DateTime.makeUnsafe("2026-10-14T00:00:00Z"),
+          attemptId: RunAttemptId.make(`policy-${ordinal}`),
+          text: "Check the repository",
+          attachments: [],
+          providerTurnOrdinal: ordinal,
+        });
+      yield* harness.runtime.startTurn(turn(1));
+      const nativeOptions = harness.getOpenedOptions();
+      assert.isUndefined(nativeOptions?.disallowedTools);
+      yield* settings.set({
+        ...DEFAULT_SERVER_SETTINGS,
+        delegationPolicy: {
+          ...DEFAULT_SERVER_SETTINGS.delegationPolicy,
+          mode: "t3-managed",
+        },
+      });
+      for (const name of ["Agent", "Task", "Workflow"]) {
+        const denied = yield* Effect.promise(() =>
+          nativeOptions!.canUseTool!(
+            name,
+            {},
+            {
+              signal: new AbortController().signal,
+              toolUseID: `denied-${name}`,
+              requestId: `denied-${name}`,
+            },
+          ),
+        );
+        assert.equal(denied?.behavior, "deny");
+      }
+      yield* harness.offerAndWait(turnOneResult);
+      yield* Queue.take(harness.terminalReceipts);
+      yield* harness.runtime.startTurn(turn(2));
+      assert.notStrictEqual(harness.getOpenedOptions(), nativeOptions);
+      assert.deepEqual(harness.getOpenedOptions()?.disallowedTools, ["Agent", "Task", "Workflow"]);
+      yield* Queue.offer(harness.processQueues[1]!, turnOneResult);
+      yield* Queue.take(harness.terminalReceipts);
+      yield* settings.set(DEFAULT_SERVER_SETTINGS);
+      yield* harness.runtime.startTurn(turn(3));
+      assert.isUndefined(harness.getOpenedOptions()?.disallowedTools);
+      assert.lengthOf(harness.processQueues, 3);
+    }).pipe(
+      Effect.scoped,
+      Effect.provide(
+        Layer.mergeAll(
+          IdAllocator.layer,
+          McpProviderSessions.layer,
+          NodeServices.layer,
+          TestProviderHost.layer().pipe(Layer.provide(NodeServices.layer)),
+        ),
+      ),
+    ),
+  );
 
   it.effect.each([
     { isError: false, title: "Check weather" },

@@ -2,6 +2,7 @@ import {
   CommandId,
   type RunId,
   isProviderAvailable,
+  resolveProjectProviderInstanceEnabled,
   MessageId,
   type ModelSelection,
   NodeId,
@@ -83,6 +84,11 @@ import {
 } from "../orchestration-v2/DispatchModeLimit.ts";
 import { runOutcome } from "../orchestration-v2/RestartBackgroundNote.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
+import { DelegationSelectionError } from "../orchestration-v2/delegationRouting.ts";
+import {
+  managedDelegationDrivers,
+  resolveDelegationPolicy,
+} from "../orchestration-v2/combinedDelegationRoutes.ts";
 import * as ThreadLaunchService from "../orchestration-v2/ThreadLaunchService.ts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import { isSnoozed } from "../orchestration-v2/ThreadSettlementService.ts";
@@ -115,6 +121,11 @@ const DEFAULT_THREAD_LIST_LIMIT = 50;
 const DEFAULT_THREAD_READ_LIMIT = 50;
 const DEFAULT_THREAD_RUN_LIMIT = 10;
 const DEFAULT_THREAD_ITEM_MAX_CHARS = 20_000;
+
+const isDelegationOptionsError = Schema.is(
+  ThreadManagementService.ThreadManagementDelegationOptionsError,
+);
+const isDelegationSelectionError = Schema.is(DelegationSelectionError);
 
 interface ResolvedTarget {
   readonly modelSelection: ModelSelection;
@@ -1445,6 +1456,7 @@ const make = Effect.gen(function* () {
         hasPendingChildRuns: hasPendingChildRuns(childProjection, childRun),
         providerInstanceId: task.providerInstanceId,
         model: task.model,
+        ...(task.routingDecision === undefined ? {} : { routingDecision: task.routingDecision }),
         summary: derivedResult,
         resultContextTransferId: resultTransfer?.id ?? null,
         latestTerminalRunId: terminalRun?.id ?? null,
@@ -1902,21 +1914,48 @@ const make = Effect.gen(function* () {
         const providers = yield* loadProviders;
         const orchestrationCapableInstanceIds = yield* loadOrchestrationCapableInstanceIds();
         // Models the user hid from pickers stay out of the catalog agents choose from.
-        const modelPreferences = yield* serverSettings.getSettings.pipe(
-          Effect.map((settings) => settings.providerModelPreferences ?? {}),
+        const settings = yield* serverSettings.getSettings.pipe(
           Effect.mapError(() => failure("orchestration_error", "Unable to read server settings.")),
         );
+        const modelPreferences = settings.providerModelPreferences ?? {};
+        const delegationPolicy = resolveDelegationPolicy(settings.delegationPolicy);
         return {
+          delegationPolicy,
+          delegationConstraints: [
+            "Delegated effort is capped at xhigh. Fast mode and priority service are forbidden.",
+            delegationPolicy.mode === "t3-managed"
+              ? "T3 chooses every delegated target. Native delegation controls apply to Codex, Claude, and Muse only."
+              : "T3 applies the policy to automatic targets and validates explicit targets. Native provider delegation remains available.",
+          ],
           parentThreadId: parent?.thread.id ?? null,
           inheritedProviderInstanceId: parent?.thread.modelSelection.instanceId ?? null,
           inheritedModel: parent?.thread.modelSelection.model ?? null,
           runtimeMode: limits.runtimeMode,
           interactionMode: limits.interactionMode,
           providers: providers.map((provider) => {
-            const constraints = providerConstraints(
-              provider,
-              orchestrationCapableInstanceIds.has(provider.instanceId),
-            );
+            const constraints = [
+              ...providerConstraints(
+                parent === undefined
+                  ? provider
+                  : {
+                      ...provider,
+                      enabled: resolveProjectProviderInstanceEnabled(
+                        settings,
+                        parent.thread.projectId,
+                        provider.instanceId,
+                      ),
+                    },
+                orchestrationCapableInstanceIds.has(provider.instanceId),
+              ),
+            ];
+            if (
+              delegationPolicy.mode === "t3-managed" &&
+              !managedDelegationDrivers.has(provider.driver)
+            ) {
+              constraints.push(
+                "This adapter has no supported native delegation controls for T3-managed mode.",
+              );
+            }
             return {
               providerInstanceId: provider.instanceId,
               driverKind: provider.driver,
@@ -1959,46 +1998,59 @@ const make = Effect.gen(function* () {
     delegateTask: (callerScope, input) =>
       Effect.gen(function* () {
         const { scope, parent } = yield* loadThreadCaller(callerScope, "delegate_task");
+        const key = yield* requestKey(input.clientRequestId);
+        const commandId = stableCommandId({ scope, requestKey: key, operation: "delegate-task" });
+        const isRetryOfAcceptedDelegation = yield* threadManagement.hasReceipt(commandId);
         const parentRun = parent.runs
-          .filter(ThreadManagementService.isActiveRun)
+          .filter((run) =>
+            isRetryOfAcceptedDelegation
+              ? run.rootNodeId !== null
+              : ThreadManagementService.isActiveRun(run),
+          )
           .toSorted((left, right) => right.ordinal - left.ordinal)[0];
         if (
           parentRun === undefined ||
           parentRun.rootNodeId === null ||
-          parentRun.providerInstanceId !== scope.thread.providerInstanceId
+          (!isRetryOfAcceptedDelegation &&
+            parentRun.providerInstanceId !== scope.thread.providerInstanceId)
         ) {
           return yield* failure(
             "parent_not_active",
             "Delegated tasks require an active run owned by this MCP provider session.",
           );
         }
-        const providers = yield* loadProviders;
-        // Computed before resolving the target so a retry of an already
-        // accepted delegation can be recognized: dispatching under the same
-        // command id only replays the recorded result, so candidate
-        // selection must not refuse it over the project's current settings.
-        const key = yield* requestKey(input.clientRequestId);
-        const commandId = stableCommandId({
-          scope,
-          requestKey: key,
-          operation: "delegate-task",
-        });
-        const isRetryOfAcceptedDelegation = yield* threadManagement.hasReceipt(commandId);
-        const target = yield* resolveTargetRechecking({
-          parent,
-          target: input.target,
-          providers,
-          skipProjectEnablementFilter: isRetryOfAcceptedDelegation,
-        });
-        const runtimeMode = yield* resolveRuntimeMode(
-          parent.thread.runtimeMode,
-          input.runtimeMode,
-          target,
-        );
-        const interactionMode = yield* resolveInteractionMode(
-          parent.thread.interactionMode,
-          input.interactionMode,
-        );
+        const settings = isRetryOfAcceptedDelegation
+          ? undefined
+          : yield* serverSettings.getSettings.pipe(
+              Effect.mapError(() =>
+                failure("orchestration_error", "Unable to read server settings."),
+              ),
+            );
+        const automaticTarget =
+          input.target === undefined || settings?.delegationPolicy.mode === "t3-managed";
+        // Automatic targets are only hints. The domain service selects and validates the actual target.
+        const target: ResolvedTarget =
+          isRetryOfAcceptedDelegation || automaticTarget
+            ? {
+                modelSelection: {
+                  instanceId:
+                    input.target?.providerInstanceId ?? parent.thread.modelSelection.instanceId,
+                  model: input.target?.model ?? parent.thread.modelSelection.model,
+                  ...(input.target?.options === undefined ? {} : { options: input.target.options }),
+                },
+                supportedRuntimeModes: undefined,
+              }
+            : yield* resolveTargetRechecking({
+                parent,
+                target: input.target,
+                providers: yield* loadProviders,
+              });
+        const runtimeMode = isRetryOfAcceptedDelegation
+          ? parent.thread.runtimeMode
+          : yield* resolveRuntimeMode(parent.thread.runtimeMode, input.runtimeMode, target);
+        const interactionMode = isRetryOfAcceptedDelegation
+          ? parent.thread.interactionMode
+          : yield* resolveInteractionMode(parent.thread.interactionMode, input.interactionMode);
         let workspaceStrategy: OrchestrationV2ThreadLaunchWorkspaceStrategy | undefined;
         if (input.isolation === "worktree" && !isRetryOfAcceptedDelegation) {
           const project = yield* requireProject(parent.thread.projectId);
@@ -2029,6 +2081,9 @@ const make = Effect.gen(function* () {
             task: taskPrompt(input),
             ...(input.title === undefined ? {} : { title: input.title }),
             modelSelection: target.modelSelection,
+            delegationTargetExplicit: input.target !== undefined,
+            ...(input.role === undefined ? {} : { role: input.role }),
+            ...(input.capability === undefined ? {} : { capability: input.capability }),
             runtimeMode,
             interactionMode,
             ...(workspaceStrategy === undefined ? {} : { workspaceStrategy }),
@@ -2039,12 +2094,18 @@ const make = Effect.gen(function* () {
           })
           .pipe(
             Effect.mapError((error) =>
-              error._tag === "ThreadManagementProviderInstanceDisabledError"
-                ? threadManagementFailure(error)
-                : failure(
-                    "orchestration_error",
-                    `Unable to create delegated task: ${errorMessage(error)}`,
-                  ),
+              error._tag === "OrchestratorCommandRejectedError" &&
+              isDelegationOptionsError(error.cause)
+                ? failure("invalid_request", error.cause.message)
+                : error._tag === "OrchestratorCommandRejectedError" &&
+                    isDelegationSelectionError(error.cause)
+                  ? failure("model_unavailable", error.cause.message)
+                  : error._tag === "ThreadManagementProviderInstanceDisabledError"
+                    ? threadManagementFailure(error)
+                    : failure(
+                        "orchestration_error",
+                        `Unable to create delegated task: ${errorMessage(error)}`,
+                      ),
             ),
           );
         const taskEvent = result.storedEvents.find(

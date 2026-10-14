@@ -3,6 +3,7 @@ import * as Schema from "effect/Schema";
 
 import {
   OrchestratorMcpCreateThreadsInput,
+  OrchestratorMcpCapabilitiesResult,
   OrchestratorMcpDelegateTaskInput,
   OrchestratorMcpDelegateTaskResult,
   OrchestratorMcpThreadInterruptInput,
@@ -169,5 +170,51 @@ describe("orchestrator MCP contracts", () => {
         reason: "Loop converged.",
       }).reason,
     ).toBe("Loop converged.");
+  });
+});
+
+describe("delegation policy MCP contracts", () => {
+  it("preserves advisory roles and task capability", () => {
+    expect(
+      decodeDelegateTaskInput({
+        task: "Check the design",
+        role: "advice",
+        capability: "architecture",
+      }),
+    ).toMatchObject({ role: "advice", capability: "architecture" });
+    expect(decodeDelegateTaskInput({ task: "Check the design" })).not.toHaveProperty("capability");
+  });
+
+  it("rejects invalid task capabilities", () => {
+    expect(() =>
+      decodeDelegateTaskInput({ task: "Check the design", capability: "unknown" }),
+    ).toThrow();
+  });
+
+  it("reports the environment policy without requiring the field from older servers", () => {
+    const decode = Schema.decodeUnknownSync(OrchestratorMcpCapabilitiesResult);
+    const input = {
+      parentThreadId: null,
+      inheritedProviderInstanceId: null,
+      inheritedModel: null,
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      providers: [],
+      features: {
+        appOwnedSubagents: true,
+        asyncPolling: true,
+        cancellation: true,
+        batchThreadCreation: true,
+        threadManagement: true,
+        incrementalThreadRead: true,
+        scheduledTasks: true,
+        maxBatchThreads: 20,
+      },
+    };
+    expect(decode(input)).not.toHaveProperty("delegationPolicy");
+    expect(decode({ ...input, delegationPolicy: { version: 1 } }).delegationPolicy).toMatchObject({
+      version: 1,
+      mode: "native-preferred",
+    });
   });
 });

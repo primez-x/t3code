@@ -399,6 +399,27 @@ export const SETTINGS_SEARCH_ITEMS = [
     searchTerms: ["notification toast popup completion input approval failure"],
   },
   {
+    id: "delegation-mode",
+    title: "Delegation mode",
+    to: "/settings/general",
+    scope: "environment-defaults",
+    searchTerms: ["native preferred t3 managed provider subagents assignments root model advisor"],
+  },
+  {
+    id: "delegation-usage-balance",
+    title: "Usage balance",
+    to: "/settings/general",
+    scope: "environment-defaults",
+    searchTerms: ["delegation usage quota limits available capacity"],
+  },
+  {
+    id: "delegation-model-diversity",
+    title: "Model diversity",
+    to: "/settings/general",
+    scope: "environment-defaults",
+    searchTerms: ["delegation alternate provider cost capability"],
+  },
+  {
     id: "time-format",
     title: "Time format",
     to: "/settings/general",

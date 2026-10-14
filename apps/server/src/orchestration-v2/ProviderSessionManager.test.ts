@@ -331,6 +331,8 @@ const makeProviderAdapter = Effect.fnUntraced(function* (
     readonly beforeOpen?: (input: {
       readonly providerSessionId: ProviderSessionId;
       readonly initialProviderItemIdentityVersion?: 2;
+      readonly initialNativeThreadId?: string;
+      readonly runtimePolicy: ProviderAdapter.ProviderAdapterV2RuntimePolicy;
     }) => Effect.Effect<void>;
     readonly hasPendingBackgroundWork?: Effect.Effect<boolean>;
     readonly hasPendingBackgroundWorkForThread?: Effect.Effect<boolean>;
@@ -475,6 +477,8 @@ function layerTest(input: {
   readonly beforeOpen?: (input: {
     readonly providerSessionId: ProviderSessionId;
     readonly initialProviderItemIdentityVersion?: 2;
+    readonly initialNativeThreadId?: string;
+    readonly runtimePolicy: ProviderAdapter.ProviderAdapterV2RuntimePolicy;
   }) => Effect.Effect<void>;
   readonly failReleaseEventWrites?: boolean;
   readonly flakyReleaseWrites?: FlakyReleaseWrites;
@@ -824,6 +828,169 @@ function makePendingRuntimeRequestEvents(input: {
     return { events, providerEvents, requestId, nodeId };
   });
 }
+
+it.effect.each([false, true])(
+  "refreshes stale delegation sessions after background work clears (%s)",
+  (pinned) =>
+    Effect.gen(function* () {
+      const state = yield* Ref.make(emptyState);
+      const pending = yield* Ref.make(pinned);
+      const probed = yield* Deferred.make<void>();
+      const settingsLayer = ServerSettings.layerTest();
+      const launchPolicies: unknown[] = [];
+      const resumedIds: unknown[] = [];
+      yield* Effect.gen(function* () {
+        const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+        const settings = yield* ServerSettings.ServerSettingsService;
+        const eventSink = yield* EventSink.EventSinkV2;
+        const idAllocator = yield* IdAllocator.IdAllocatorV2;
+        const threadId = ThreadId.make(`delegation-refresh-${pinned}`);
+        const now = yield* DateTime.now;
+        yield* eventSink.write({
+          events: [yield* makeThreadCreatedEvent({ idAllocator, threadId, now })],
+        });
+        const providerSessionId = yield* idAllocator.allocate.providerSession({
+          providerInstanceId: modelSelection.instanceId,
+          threadId,
+        });
+        const input = {
+          threadId,
+          providerSessionId,
+          modelSelection,
+          runtimePolicy,
+          initialNativeThreadId: "saved-native-thread",
+        };
+        const first = yield* manager.open(input);
+        yield* settings.updateSettings({ delegationPolicy: { mode: "t3-managed" } });
+        const reopen = yield* manager
+          .open({ ...input, resumeFromSession: first.providerSession })
+          .pipe(Effect.forkChild({ startImmediately: true }));
+        if (pinned) {
+          yield* Deferred.await(probed);
+          assert.equal((yield* Ref.get(state)).closeCount, 0);
+          yield* Ref.set(pending, false);
+          yield* Queue.offer((yield* Ref.get(state)).eventQueues.get(String(providerSessionId))!, {
+            type: "provider_session.updated",
+            driver: CODEX_DRIVER,
+            providerSession: first.providerSession,
+          });
+        }
+        const managed = yield* Fiber.join(reopen);
+        assert.notStrictEqual(managed, first);
+        assert.equal((yield* Ref.get(state)).closeCount, 1);
+        yield* settings.updateSettings({ delegationPolicy: { mode: "native-preferred" } });
+        const native = yield* manager.open({
+          ...input,
+          resumeFromSession: managed.providerSession,
+        });
+        assert.notStrictEqual(native, managed);
+        assert.deepEqual(launchPolicies, ["native-preferred", "t3-managed", "native-preferred"]);
+        assert.deepEqual(resumedIds, [
+          "saved-native-thread",
+          "saved-native-thread",
+          "saved-native-thread",
+        ]);
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(
+            settingsLayer,
+            layerTest({
+              state,
+              idleTimeoutMs: 60_000,
+              serverSettingsLayer: settingsLayer,
+              hasPendingBackgroundWork: Ref.get(pending).pipe(
+                Effect.tap(() => Deferred.succeed(probed, undefined)),
+              ),
+              beforeOpen: (input) =>
+                Effect.sync(() => {
+                  launchPolicies.push(Reflect.get(input.runtimePolicy, "delegationMode"));
+                  resumedIds.push(input.initialNativeThreadId);
+                }),
+            }),
+          ),
+        ),
+      );
+    }),
+);
+
+it.effect("preserves active shared sessions across delegation policy changes", () =>
+  Effect.gen(function* () {
+    const state = yield* Ref.make(emptyState);
+    const settingsLayer = ServerSettings.layerTest();
+    const probed = yield* Deferred.make<void>();
+    yield* Effect.gen(function* () {
+      const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+      const settings = yield* ServerSettings.ServerSettingsService;
+      const eventSink = yield* EventSink.EventSinkV2;
+      const projectionStore = yield* ProjectionStore.ProjectionStoreV2;
+      const idAllocator = yield* IdAllocator.IdAllocatorV2;
+      const now = yield* DateTime.now;
+      const threadId = ThreadId.make("delegation-active-session");
+      const providerSessionId = yield* idAllocator.allocate.providerSession({
+        providerInstanceId: modelSelection.instanceId,
+        threadId,
+      });
+      const providerThread = makeProviderThread({ idAllocator, threadId, providerSessionId, now });
+      yield* eventSink.write({
+        events: [yield* makeThreadCreatedEvent({ idAllocator, threadId, now })],
+      });
+      const input = { threadId, providerSessionId, modelSelection, runtimePolicy };
+      const runtime = yield* manager.open(input);
+      const runId = idAllocator.derive.run({ threadId, ordinal: 1 });
+      yield* runtime.startTurn({
+        appThread: (yield* projectionStore.getThreadProjection(threadId)).thread,
+        threadId,
+        runId,
+        runOrdinal: 1,
+        providerTurnOrdinal: 1,
+        attemptId: idAllocator.derive.runAttempt({ runId, attemptOrdinal: 1 }),
+        rootNodeId: idAllocator.derive.rootNode({ runId }),
+        providerThread,
+        message: {
+          createdBy: "user",
+          creationSource: "web",
+          messageId: yield* idAllocator.allocate.message({ threadId, ordinal: 1 }),
+          text: "Inspect",
+          attachments: [],
+        },
+        modelSelection,
+        runtimePolicy,
+      });
+      yield* settings.updateSettings({ delegationPolicy: { mode: "t3-managed" } });
+      const reopen = yield* manager.open(input).pipe(Effect.forkChild({ startImmediately: true }));
+      yield* Deferred.await(probed);
+      assert.equal((yield* Ref.get(state)).closeCount, 0);
+      assert.equal((yield* Ref.get(state)).openCount, 1);
+      yield* Queue.offer((yield* Ref.get(state)).eventQueues.get(String(providerSessionId))!, {
+        type: "turn.terminal",
+        driver: CODEX_DRIVER,
+        providerThreadId: providerThread.id,
+        providerTurnId: idAllocator.derive.providerTurn({
+          driver: CODEX_DRIVER,
+          nativeTurnId: "native-turn",
+        }),
+        runOrdinal: 1,
+        status: "completed",
+        failure: null,
+        threadDisposition: "reusable",
+      });
+      assert.notStrictEqual(yield* Fiber.join(reopen), runtime);
+      assert.equal((yield* Ref.get(state)).closeCount, 1);
+    }).pipe(
+      Effect.provide(
+        Layer.mergeAll(
+          settingsLayer,
+          layerTest({
+            state,
+            idleTimeoutMs: 60_000,
+            serverSettingsLayer: settingsLayer,
+            hasPendingBackgroundWork: Deferred.succeed(probed, undefined).pipe(Effect.as(false)),
+          }),
+        ),
+      ),
+    );
+  }),
+);
 
 it.effect("ProviderSessionManagerV2 opens independent sessions concurrently", () =>
   Effect.gen(function* () {

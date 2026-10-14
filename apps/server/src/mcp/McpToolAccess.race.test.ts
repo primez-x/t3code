@@ -1,3 +1,4 @@
+import { makeDelegationFixtures } from "../orchestration-v2/testkit/DelegationFixtures.ts";
 import { assert, it } from "@effect/vitest";
 import {
   CommandId,
@@ -190,6 +191,11 @@ it.layer(layerOrchestrator)("writesThreads against a mode raise", (it) => {
       Effect.provide(
         ThreadManagement.layer.pipe(
           Layer.provide(ServerSettings.layerTest()),
+          Layer.provide(ProviderAdapterRegistry.layerFromAdapters([adapter])),
+          Layer.provide(
+            makeDelegationFixtures([{ instanceId, model: "gpt-5", driver: adapter.driver }])
+              .layerRegistry,
+          ),
           Layer.provide(CommandReceiptStore.layer.pipe(Layer.provide(layerDatabase))),
         ),
       ),
@@ -208,6 +214,11 @@ it.layer(layerOrchestrator)("writesThreads against a mode raise", (it) => {
       Effect.provide(
         ThreadManagement.layer.pipe(
           Layer.provide(ServerSettings.layerTest()),
+          Layer.provide(ProviderAdapterRegistry.layerFromAdapters([adapter])),
+          Layer.provide(
+            makeDelegationFixtures([{ instanceId, model: "gpt-5", driver: adapter.driver }])
+              .layerRegistry,
+          ),
           Layer.provide(CommandReceiptStore.layer.pipe(Layer.provide(layerDatabase))),
         ),
       ),

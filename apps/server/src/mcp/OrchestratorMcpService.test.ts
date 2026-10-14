@@ -2,6 +2,7 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
 import {
   CommandId,
+  type OrchestrationV2Command,
   EnvironmentId,
   NodeId,
   type OrchestrationV2ThreadShell,
@@ -942,7 +943,18 @@ describe("OrchestratorMcpService provider resolution", () => {
           Layer.mock(ThreadManagementService.ThreadManagementService)({
             getThreadRecords: () => Effect.succeed(parentProjection([])),
           }),
-          ServerSettings.layerTest(),
+          ServerSettings.layerTest({
+            providerInstances: providers.reduce(
+              (configs, provider) => {
+                configs[provider.instanceId] = {
+                  driver: provider.driver,
+                  enabled: provider.enabled,
+                };
+                return configs;
+              },
+              {} as Record<ProviderInstanceId, { driver: ProviderDriverKind; enabled: boolean }>,
+            ),
+          }),
           Layer.mock(ProviderRegistry.ProviderRegistry)({
             getProviders: Effect.sync(() => providers),
           }),
@@ -1920,6 +1932,175 @@ describe("OrchestratorMcpService provider resolution", () => {
             }
           }).pipe(Effect.provide(layerOrchestratorService.pipe(Layer.provide(layerDependencies))));
         }
+      }),
+  );
+
+  it.effect(
+    "managed and automatic delegation reach the domain guard with saved decisions on replay",
+    () =>
+      Effect.gen(function* () {
+        const accepted = yield* Ref.make(false);
+        const commands = yield* Ref.make<ReadonlyArray<OrchestrationV2Command>>([]);
+        const routingDecision = {
+          policyVersion: 1 as const,
+          capability: "coding" as const,
+          role: "implementation" as const,
+          reason: "headroom" as const,
+          headroomPercent: 80,
+          usageCheckedAt: "2026-10-14T12:00:00Z",
+        };
+        const task = {
+          id: taskId,
+          threadId: parentThreadId,
+          runId: parentRunId,
+          parentNodeId,
+          origin: "app_owned",
+          createdBy: "agent",
+          driver: "codex",
+          providerInstanceId: codexInstanceId,
+          providerThreadId: null,
+          childThreadId,
+          nativeTaskRef: null,
+          prompt: "Implement",
+          title: null,
+          model: "gpt-6.1-sol",
+          status: "running",
+          result: null,
+          startedAt: null,
+          completedAt: null,
+          routingDecision,
+        };
+        const dependencies = Layer.mergeAll(
+          NodeServices.layer,
+          Layer.mock(ThreadManagementService.ThreadManagementService)({
+            hasReceipt: () => Ref.get(accepted),
+            getThreadRecords: (threadId) =>
+              Ref.get(accepted).pipe(
+                Effect.map((saved) => {
+                  if (threadId !== parentThreadId) return childProjection;
+                  const parent = parentProjection(saved ? [task] : [], {
+                    instanceId: codexInstanceId,
+                    model: "unsupported-root",
+                  });
+                  return saved
+                    ? {
+                        ...parent,
+                        runs: [
+                          ...parent.runs.map((run) => ({ ...run, status: "completed" as const })),
+                          {
+                            ...parent.runs[0]!,
+                            id: RunId.make("newer-queued-parent-run"),
+                            ordinal: 2,
+                            status: "queued" as const,
+                            rootNodeId: null,
+                          },
+                        ],
+                      }
+                    : parent;
+                }),
+              ),
+            dispatch: (command) =>
+              Ref.update(commands, (current) => [
+                ...current,
+                command as OrchestrationV2Command,
+              ]).pipe(
+                Effect.andThen(Ref.set(accepted, true)),
+                Effect.as({
+                  sequence: 1,
+                  storedEvents: [
+                    {
+                      sequence: 1,
+                      commandId: null,
+                      event: { type: "subagent.updated", payload: task },
+                    },
+                  ],
+                } as never),
+              ),
+          }),
+          ServerSettings.layerTest({ delegationPolicy: { mode: "t3-managed" } }),
+          Layer.mock(ProviderRegistry.ProviderRegistry)({
+            getProviders: Effect.die(
+              "The MCP transport must leave managed catalog checks to the domain guard",
+            ),
+          }),
+          adapterRegistryLayer([]),
+          Layer.mock(ProjectService.ProjectService)({}),
+          Layer.mock(SecretRequests.SecretRequests)({}),
+          Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
+        );
+        yield* Effect.gen(function* () {
+          const service = yield* OrchestratorMcpService.OrchestratorMcpService;
+          const first = yield* service.delegateTask(scope, {
+            task: "Implement",
+            role: "implementation",
+            capability: "coding",
+            mode: "async",
+            clientRequestId: "managed-domain-guard",
+          });
+          assert.deepEqual(first.routingDecision, routingDecision);
+          const retry = yield* service.delegateTask(scope, {
+            task: "Implement",
+            role: "research",
+            target: {
+              providerInstanceId: ProviderInstanceId.make("missing"),
+              model: "missing-model",
+              options: [{ id: "reasoningEffort", value: "max" }],
+            },
+            mode: "async",
+            clientRequestId: "managed-domain-guard",
+          });
+          assert.deepEqual(retry.routingDecision, routingDecision);
+          assert.equal(retry.model, "gpt-6.1-sol");
+          const requests = yield* Ref.get(commands);
+          assert.equal(requests.length, 2);
+          assert.equal(requests[0]?.type, "delegated_task.request");
+          if (requests[0]?.type === "delegated_task.request") {
+            assert.equal(requests[0].role, "implementation");
+            assert.equal(requests[0].capability, "coding");
+            assert.equal(requests[0].delegationTargetExplicit, false);
+          }
+        }).pipe(Effect.provide(layerOrchestratorService.pipe(Layer.provide(dependencies))));
+      }),
+  );
+
+  it.effect(
+    "managed capabilities expose resolved routes and exclude adapters without native controls",
+    () =>
+      Effect.gen(function* () {
+        const provider = providerSnapshot({
+          instanceId: antigravityInstanceId,
+          driver: ProviderDriverKind.make("antigravity"),
+          model: "ant-model",
+        });
+        const dependencies = Layer.mergeAll(
+          NodeServices.layer,
+          Layer.mock(ThreadManagementService.ThreadManagementService)({
+            getThreadRecords: () => Effect.succeed(parentProjection([])),
+          }),
+          ServerSettings.layerTest({
+            delegationPolicy: { mode: "t3-managed" },
+            providerInstances: {
+              [provider.instanceId]: { driver: provider.driver, enabled: true },
+            },
+          }),
+          providerRegistryLayer([provider]),
+          adapterRegistryLayer([provider.instanceId]),
+          Layer.mock(ProjectService.ProjectService)({}),
+          Layer.mock(SecretRequests.SecretRequests)({}),
+          Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
+        );
+        yield* Effect.gen(function* () {
+          const service = yield* OrchestratorMcpService.OrchestratorMcpService;
+          const result = yield* service.capabilities(scope);
+          assert.equal(result.delegationPolicy?.mode, "t3-managed");
+          assert.equal(result.delegationPolicy?.routes.length, 22);
+          assert.isFalse(result.providers[0]?.canRunChildTask);
+          assert.isTrue(
+            result.providers[0]?.constraints.some((constraint) =>
+              constraint.includes("native delegation controls"),
+            ),
+          );
+        }).pipe(Effect.provide(layerOrchestratorService.pipe(Layer.provide(dependencies))));
       }),
   );
 

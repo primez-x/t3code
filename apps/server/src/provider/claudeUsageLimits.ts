@@ -1,25 +1,19 @@
-/**
- * Claude Code subscription usage. Both sources produce windows with the same
- * ids so a turn-driven `rate_limit_event` lands on the row the SDK's
- * `get_usage` read established:
- *
- * - `get_usage` (on demand, during the capabilities probe) reports every
- *   window at once as 0–100 percentages with ISO reset times.
- * - `rate_limit_event` (streamed during a turn) names one window at a time
- *   with a 0–1 utilization fraction and an epoch-seconds reset.
- *
- * @module provider/claudeUsageLimits
- */
+/** Claude subscription quotas from account probes and sparse runtime events. */
+// @effect-diagnostics-next-line nodeBuiltinImport:off -- Scope IDs require a synchronous digest.
+import * as NodeCrypto from "node:crypto";
+
 import type { SDKControlGetUsageResponse, SDKRateLimitInfo } from "@anthropic-ai/claude-agent-sdk";
-import type {
-  ProviderUsageLimitsUpdate,
-  ServerProviderUsageLimits,
-  ServerProviderUsageWindow,
+import {
+  TrimmedNonEmptyString,
+  type ProviderUsageLimitsUpdate,
+  type ServerProviderUsageLimits,
+  type ServerProviderUsageWindow,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
+import * as Schema from "effect/Schema";
 
 import {
   clampPercent,
@@ -29,29 +23,25 @@ import {
 
 const SESSION_MINS = 5 * 60;
 const WEEK_MINS = 7 * 24 * 60;
-
-/**
- * The account-wide windows, keyed by the SDK's `rateLimitType`. Model-scoped
- * weeklies are additive on top of these: the CLI reports them under
- * `rate_limits.model_scoped[]` on `get_usage` and streams the overage-included
- * model bucket (Fable today) as `seven_day_overage_included`.
- */
-const WINDOWS: Readonly<
-  Record<string, Pick<ServerProviderUsageWindow, "kind" | "label" | "windowDurationMins">>
-> = {
-  five_hour: { kind: "session", label: "Session", windowDurationMins: SESSION_MINS },
-  seven_day: { kind: "weekly", label: "Weekly", windowDurationMins: WEEK_MINS },
-};
-
-/**
- * The streamed event names the overage-included bucket by type
- * (`seven_day_overage_included`), while `get_usage` names it by the model's
- * `display_name`. Which model that is changes over time, so the probe records
- * the name it saw and the event mapper reuses it; the mid-turn update then
- * lands on the row the probe drew instead of opening a second one.
- */
 const OVERAGE_INCLUDED_EVENT_TYPE = "seven_day_overage_included";
+const FAMILY_LABELS = { fable: "Fable", opus: "Opus", sonnet: "Sonnet", haiku: "Haiku" } as const;
+const isUtilization = Schema.is(Schema.Finite.check(Schema.isGreaterThanOrEqualTo(0)));
+const decodeModelScopedWindows = Schema.decodeUnknownOption(Schema.Array(Schema.Unknown));
+const decodeModelScopedWindow = Schema.decodeUnknownOption(
+  Schema.Struct({
+    display_name: TrimmedNonEmptyString,
+    utilization: Schema.Finite.check(Schema.isGreaterThanOrEqualTo(0)),
+    resets_at: Schema.NullOr(Schema.String),
+  }),
+);
+const decodeWindow = Schema.decodeUnknownOption(
+  Schema.Struct({
+    utilization: Schema.Finite.check(Schema.isGreaterThanOrEqualTo(0)),
+    resets_at: Schema.NullOr(Schema.String),
+  }),
+);
 
+/** Each configured instance owns a separate reference for the event target. */
 export interface ClaudeScopedLimitNames {
   readonly overageIncluded: string | undefined;
 }
@@ -60,8 +50,26 @@ export const makeClaudeScopedLimitNames = Ref.make<ClaudeScopedLimitNames>({
   overageIncluded: undefined,
 });
 
-function scopedWindowId(displayName: string): string {
-  return `seven_day_${displayName.toLowerCase().replace(/[^a-z0-9]+/g, "_")}`;
+function scopedIdentity(
+  displayName: string,
+): Pick<ServerProviderUsageWindow, "id" | "label" | "modelFamily"> {
+  const match = /^(?:claude[ -])?(fable|opus|sonnet|haiku)(?:[ -](\d+(?:\.\d+)*))?$/i.exec(
+    displayName.trim(),
+  );
+  if (match) {
+    const family = match[1]!.toLowerCase() as keyof typeof FAMILY_LABELS;
+    const version = match[2];
+    return {
+      id: `seven_day_${family}${version ? `_${version.replaceAll(".", "_")}` : ""}`,
+      label: `Weekly · ${FAMILY_LABELS[family]}${version ? ` ${version}` : ""}`,
+      modelFamily: `claude-${family}`,
+    };
+  }
+  return {
+    id: `seven_day_unrecognized_${NodeCrypto.createHash("sha256").update(displayName).digest("hex")}`,
+    label: "Weekly · Unrecognized model",
+    modelFamily: "unrecognized",
+  };
 }
 
 function scopedWindow(
@@ -70,34 +78,12 @@ function scopedWindow(
   resetsAt: string | undefined,
 ): ServerProviderUsageWindow {
   return {
-    id: scopedWindowId(displayName),
+    ...scopedIdentity(displayName),
     kind: "weekly",
-    label: `Weekly · ${displayName}`,
     windowDurationMins: WEEK_MINS,
     usedPercent: clampPercent(usedPercent),
     ...(resetsAt ? { resetsAt } : {}),
   };
-}
-
-/**
- * `model_scoped` shipped in the CLI after the SDK typings we pin, so it is
- * read structurally until the `.d.ts` catches up.
- */
-interface ModelScopedWindow {
-  readonly display_name: string;
-  readonly utilization: number | null;
-  readonly resets_at: string | null;
-}
-
-function readModelScoped(rateLimits: object): ReadonlyArray<ModelScopedWindow> {
-  const raw = (rateLimits as { readonly model_scoped?: unknown }).model_scoped;
-  if (!Array.isArray(raw)) return [];
-  return raw.filter(
-    (entry): entry is ModelScopedWindow =>
-      typeof entry === "object" &&
-      entry !== null &&
-      typeof (entry as ModelScopedWindow).display_name === "string",
-  );
 }
 
 function isoFromEpochSeconds(value: number | undefined): string | undefined {
@@ -113,47 +99,46 @@ function isoFromString(value: string | null | undefined): string | undefined {
 }
 
 function makeWindow(
-  id: keyof typeof WINDOWS & string,
+  id: string,
   usedPercent: number,
   resetsAt: string | undefined,
-): ServerProviderUsageWindow {
-  const window = WINDOWS[id]!;
-  return {
-    id,
-    ...window,
-    usedPercent: clampPercent(usedPercent),
-    ...(resetsAt ? { resetsAt } : {}),
-  };
-}
-
-/**
- * Utilization is a 0–1 fraction on the streamed event. An overage-included
- * event before any probe has named the bucket is dropped: guessing a name
- * would draw a row the next probe cannot reconcile.
- */
-export function claudeRateLimitEventToUpdate(
-  info: SDKRateLimitInfo,
-  names: ClaudeScopedLimitNames,
-): ProviderUsageLimitsUpdate | undefined {
-  const type: string | undefined = info.rateLimitType;
-  if (!type || typeof info.utilization !== "number") {
-    return undefined;
+): ServerProviderUsageWindow | undefined {
+  if (id === "five_hour" || id === "seven_day") {
+    return {
+      id,
+      kind: id === "five_hour" ? "session" : "weekly",
+      label: id === "five_hour" ? "Session" : "Weekly",
+      windowDurationMins: id === "five_hour" ? SESSION_MINS : WEEK_MINS,
+      usedPercent: clampPercent(usedPercent),
+      ...(resetsAt ? { resetsAt } : {}),
+    };
   }
-  const usedPercent = info.utilization * 100;
-  const resetsAt = isoFromEpochSeconds(info.resetsAt);
-  if (type in WINDOWS) {
-    return { windows: [makeWindow(type, usedPercent, resetsAt)] };
+  if (id === OVERAGE_INCLUDED_EVENT_TYPE) {
+    return { ...scopedWindow("overage_included", usedPercent, resetsAt), id };
   }
-  if (type === OVERAGE_INCLUDED_EVENT_TYPE && names.overageIncluded) {
-    return { windows: [scopedWindow(names.overageIncluded, usedPercent, resetsAt)] };
+  if (id.startsWith("seven_day_")) {
+    return scopedWindow(id.slice("seven_day_".length), usedPercent, resetsAt);
   }
   return undefined;
 }
 
-/**
- * Percentages on the `get_usage` response are already 0–100. Also yields the
- * scoped-bucket names the response carried, for the event mapper to reuse.
- */
+/** Runtime utilization uses fractions. Unknown model scopes remain visible. */
+export function claudeRateLimitEventToUpdate(
+  info: SDKRateLimitInfo,
+  names: ClaudeScopedLimitNames,
+): ProviderUsageLimitsUpdate | undefined {
+  const type = info.rateLimitType;
+  if (!type || !isUtilization(info.utilization)) return undefined;
+  const usedPercent = Math.min(1, info.utilization) * 100;
+  const resetsAt = isoFromEpochSeconds(info.resetsAt);
+  const window =
+    type === OVERAGE_INCLUDED_EVENT_TYPE && names.overageIncluded
+      ? scopedWindow(names.overageIncluded, usedPercent, resetsAt)
+      : makeWindow(type, usedPercent, resetsAt);
+  return window ? { windows: [window] } : undefined;
+}
+
+/** Probe utilization already uses percentages. */
 export function claudeUsageResponseToLimits(input: {
   readonly response: Pick<SDKControlGetUsageResponse, "rate_limits_available" | "rate_limits">;
   readonly checkedAt: string;
@@ -166,30 +151,41 @@ export function claudeUsageResponseToLimits(input: {
     };
   }
   const windows: ServerProviderUsageWindow[] = [];
-  for (const id of Object.keys(WINDOWS)) {
-    const window = response.rate_limits[id as "five_hour" | "seven_day"];
-    if (!window || typeof window.utilization !== "number") continue;
-    windows.push(makeWindow(id, window.utilization, isoFromString(window.resets_at)));
+  for (const [id, raw] of Object.entries(response.rate_limits)) {
+    const decoded = decodeWindow(raw);
+    if (Option.isNone(decoded)) continue;
+    const window = makeWindow(
+      id,
+      decoded.value.utilization,
+      isoFromString(decoded.value.resets_at),
+    );
+    if (window) windows.push(window);
   }
-  // The CLI filters `model_scoped` to the overage-included allowlist, which
-  // today holds one model; the first entry is the one the event refers to.
-  let overageIncluded: string | undefined;
-  for (const entry of readModelScoped(response.rate_limits)) {
-    if (typeof entry.utilization !== "number") continue;
+  const scopedNames: string[] = [];
+  const modelScoped = decodeModelScopedWindows(response.rate_limits.model_scoped);
+  for (const raw of Option.getOrElse(modelScoped, () => [])) {
+    const decoded = decodeModelScopedWindow(raw);
+    if (Option.isNone(decoded)) continue;
+    const entry = decoded.value;
     windows.push(
       scopedWindow(entry.display_name, entry.utilization, isoFromString(entry.resets_at)),
     );
-    // Only a bucket that drew a row may receive events; naming one that was
-    // skipped would let a mid-turn event open a row the probe never showed.
-    overageIncluded ??= entry.display_name;
+    scopedNames.push(entry.display_name);
   }
+  // The event carries no model name. Fable is the known overage-included family.
+  // A single scoped bucket is unambiguous; multiple other buckets are unknown.
+  const fableNames = scopedNames.filter(
+    (name) => scopedIdentity(name).modelFamily === "claude-fable",
+  );
+  const overageIncluded =
+    fableNames.length === 1 ? fableNames[0] : scopedNames.length === 1 ? scopedNames[0] : undefined;
   return {
     limits: makeUsageLimits({ checkedAt, windows }),
     names: { overageIncluded },
   };
 }
 
-/** Probe-side helper: map the response and remember the scoped names for events. */
+/** Probe-side helper: remember the scoped event target on this instance. */
 export const recordClaudeUsageResponse = (
   namesRef: Ref.Ref<ClaudeScopedLimitNames>,
   input: Parameters<typeof claudeUsageResponseToLimits>[0],

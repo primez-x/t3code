@@ -1,5 +1,7 @@
 import {
   DEFAULT_SERVER_SETTINGS,
+  ServerSettings,
+  ServerSettingsPatch,
   ProjectId,
   ProviderDriverKind,
   ProviderInstanceId,
@@ -7,6 +9,7 @@ import {
   type ServerProvider,
 } from "@t3tools/contracts";
 import * as Duration from "effect/Duration";
+import * as Schema from "effect/Schema";
 import { describe, expect, it } from "vite-plus/test";
 import { resolveServerBackgroundActivitySettings } from "./backgroundActivitySettings.ts";
 import { createModelSelection } from "./model.ts";
@@ -1152,5 +1155,54 @@ describe("synchronized model preferences", () => {
       favorites: [],
       providerModelPreferences: {},
     });
+  });
+});
+
+describe("applyServerSettingsPatch delegation policy", () => {
+  const route = {
+    driver: "codex",
+    model: "gpt-6.1-sol",
+    effort: "high",
+    capabilities: ["coding"],
+    costPerTask: 0.25,
+  };
+  const decodeSettings = Schema.decodeUnknownSync(ServerSettings);
+  const decodePatch = Schema.decodeUnknownSync(ServerSettingsPatch);
+
+  it("preserves each destination's routes and booleans for a shared mode-only patch", () => {
+    const destinations = [
+      { balanceUsage: false, preferAlternateProvider: true, routes: [route] },
+      {
+        balanceUsage: true,
+        preferAlternateProvider: false,
+        routes: [{ ...route, driver: "claudeAgent", model: "claude-sonnet-4-6" }],
+      },
+    ];
+    const patch = decodePatch({ delegationPolicy: { mode: "t3-managed" } });
+    for (const destination of destinations) {
+      const current = decodeSettings({ delegationPolicy: destination });
+      expect(applyServerSettingsPatch(current, patch).delegationPolicy).toEqual({
+        ...current.delegationPolicy,
+        mode: "t3-managed",
+      });
+    }
+  });
+
+  it("replaces route arrays and permits an explicit empty route list", () => {
+    const current = decodeSettings({
+      delegationPolicy: {
+        balanceUsage: false,
+        routes: [route, { ...route, model: "gpt-6-astra" }],
+      },
+    });
+    const replacement = [{ ...route, model: "gpt-6-luna", capabilities: ["lookup"] }];
+    const patch = decodePatch({ delegationPolicy: { routes: replacement } });
+    const updated = applyServerSettingsPatch(current, patch);
+    expect(updated.delegationPolicy).toEqual({ ...current.delegationPolicy, routes: replacement });
+    expect(
+      applyServerSettingsPatch(updated, decodePatch({ delegationPolicy: { routes: [] } }))
+        .delegationPolicy,
+    ).toEqual({ ...current.delegationPolicy, routes: [] });
+    expect(current.delegationPolicy.routes).toHaveLength(2);
   });
 });

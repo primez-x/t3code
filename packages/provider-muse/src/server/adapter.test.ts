@@ -3,6 +3,7 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { MspError } from "@muse-code/sdk";
 import {
   MUSE_DEFAULT_MODEL,
+  DEFAULT_SERVER_SETTINGS,
   EnvironmentId,
   MessageId,
   NodeId,
@@ -191,7 +192,7 @@ const makeHarness = Effect.fnUntraced(function* (
   policy = runtimePolicy,
   overrides: Pick<
     MuseAdapterV2Options,
-    "createHost" | "nativeEventLogger" | "modelCatalog" | "continuationRequests"
+    "createHost" | "nativeEventLogger" | "modelCatalog" | "continuationRequests" | "onUsageLimits"
   > = {},
 ) {
   let hostCount = 0;
@@ -351,6 +352,152 @@ const approval = (turnId: string) => ({
 });
 
 describe("MuseAdapterV2", () => {
+  it.effect("publishes Muse subscription usage from the existing host without a model turn", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakeMuse();
+      const observed = {
+        observedAtMs: Date.parse("2026-07-18T10:00:00Z"),
+        tier: "private-subscription-label",
+        window: {
+          usedPercent: 64,
+          windowDurationMins: 300,
+          resetsAtMs: Date.parse("2026-07-18T14:00:00Z"),
+        },
+        weekly: { usedPercent: 25, resetsAtMs: Date.parse("2026-07-24T10:00:00Z") },
+      };
+      fake.queueResponse("usage/read", observed);
+      const updates = yield* Queue.unbounded<unknown>();
+      const published: unknown[] = [];
+      yield* makeHarness(fake, INSTANCE_ID, undefined, undefined, undefined, runtimePolicy, {
+        onUsageLimits: (update) =>
+          Effect.sync(() => {
+            published.push(update);
+          }).pipe(Effect.andThen(Queue.offer(updates, update)), Effect.asVoid),
+      });
+      assert.lengthOf(published, 1);
+      assert.isTrue(fake.calls.some((call) => call.method === "usage/read"));
+      assert.isFalse(fake.calls.some((call) => call.method === "turn/start"));
+      assert.notInclude(JSON.stringify(published), "private-subscription-label");
+      assert.deepInclude(published[0], { checkedAt: "2026-07-18T10:00:00.000Z" });
+      yield* Queue.take(updates);
+      yield* fake.emit("usage/changed", {
+        ...observed,
+        sessionId: undefined,
+        observedAtMs: Date.parse("2026-07-18T10:01:00Z"),
+      });
+      const changed = yield* Queue.take(updates);
+      assert.deepInclude(changed, { checkedAt: "2026-07-18T10:01:00.000Z" });
+      assert.isFalse(fake.calls.some((call) => call.method === "turn/start"));
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
+  it.effect("omits unavailable T3 delegation guidance while native tools remain enabled", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakeMuse();
+      const harness = yield* makeHarness(fake);
+      yield* startConversation(harness, fake);
+      const call = fake.calls.find((entry) => entry.method === "turn/start");
+      assert.isDefined(call);
+      const text = (call!.params.input as Array<{ text?: string }>)
+        .map((part) => part.text ?? "")
+        .join("\n");
+      assert.notInclude(text, "delegate_task");
+      assert.notInclude(text, "T3 Code delegation mode");
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
+  it.effect("preserves Muse background children during a policy refresh race", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakeMuse();
+      const harness = yield* makeHarness(fake);
+      const { nativeId } = yield* startConversation(harness, fake);
+      yield* fake.emit("item/started", {
+        turnId: nativeId,
+        item: {
+          itemId: "policy-child",
+          kind: "subagent",
+          revision: 1,
+          status: "inProgress",
+          turnId: nativeId,
+          subagentId: "policy-subagent",
+          controlStatus: "running",
+          childSessionId: "policy-child-session",
+          objective: "Inspect",
+          role: "general-purpose",
+        },
+      });
+      yield* harness.takeEvent("app_thread.created");
+      yield* fake.emit("turn/completed", { turnId: nativeId, terminal: "completed" });
+      yield* harness.takeEvent("turn.terminal");
+      yield* (yield* TestProviderHost.TestProviderHostSettings).set({
+        ...DEFAULT_SERVER_SETTINGS,
+        delegationPolicy: { ...DEFAULT_SERVER_SETTINGS.delegationPolicy, mode: "t3-managed" },
+      });
+      const rejected = yield* harness.runtime
+        .startTurn(yield* turnInput(harness.providerThread, 2))
+        .pipe(Effect.result);
+      assert.equal(rejected._tag, "Failure");
+      assert.equal(fake.closeCount(), 0);
+      assert.equal(fake.calls.filter((call) => call.method === "turn/start").length, 1);
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
+  it.effect("replaces reused hosts when delegation mode changes and restores native defaults", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakeMuse();
+      const replacement = yield* makeFakeMuse("replacement");
+      const restored = yield* makeFakeMuse("restored");
+      const modes: unknown[] = [];
+      const harness = yield* makeHarness(
+        fake,
+        INSTANCE_ID,
+        undefined,
+        replacement,
+        undefined,
+        runtimePolicy,
+        {
+          createHost: async (options) => {
+            modes.push(options.delegationMode);
+            return modes.length === 1
+              ? fake.host
+              : modes.length === 2
+                ? replacement.host
+                : restored.host;
+          },
+        },
+      );
+      const settings = yield* TestProviderHost.TestProviderHostSettings;
+      yield* settings.set({
+        ...DEFAULT_SERVER_SETTINGS,
+        delegationPolicy: {
+          ...DEFAULT_SERVER_SETTINGS.delegationPolicy,
+          mode: "t3-managed",
+        },
+      });
+      yield* harness.runtime.startTurn(yield* turnInput(harness.providerThread));
+      assert.deepStrictEqual(modes, ["native-preferred", "t3-managed"]);
+      const first = { nativeId: (yield* replacement.takeCall("turn/start")).commandId! };
+      assert.strictEqual(fake.closeCount(), 1);
+      assert.strictEqual(
+        replacement.calls.find((call) => call.method === "session/resume")?.params.sessionId,
+        harness.providerThread.nativeThreadRef?.nativeId,
+      );
+      const turnStart = replacement.calls.find((call) => call.method === "turn/start");
+      assert.isDefined(turnStart);
+      const texts = (turnStart!.params.input as Array<{ text?: string }>)
+        .map((part) => part.text ?? "")
+        .join("\n");
+      assert.include(texts, "Native agent launches are disabled");
+      assert.include(texts, "T3 delegation tools are not attached");
+      yield* replacement.emit("turn/completed", { turnId: first.nativeId, terminal: "completed" });
+      yield* harness.takeEvent("turn.terminal");
+      yield* settings.set(DEFAULT_SERVER_SETTINGS);
+      yield* harness.runtime.startTurn(yield* turnInput(harness.providerThread, 2));
+      assert.deepStrictEqual(modes, ["native-preferred", "t3-managed", "native-preferred"]);
+      assert.isTrue(restored.calls.some((call) => call.method === "turn/start"));
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
   it.effect("connects the thread's MCP credential on native start and resume", () =>
     Effect.gen(function* () {
       yield* (yield* McpProviderSessions.McpProviderSessions).set({

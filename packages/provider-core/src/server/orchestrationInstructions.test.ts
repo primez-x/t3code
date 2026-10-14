@@ -2,12 +2,39 @@ import { assert, describe, it } from "@effect/vitest";
 
 import {
   T3_CODE_ORCHESTRATION_INSTRUCTIONS,
+  t3DelegationInstructions,
   t3AcpPromptWithInstructions,
   t3OrchestrationPromptForFirstRun,
   t3OrchestrationSystemPrompt,
 } from "./orchestrationInstructions.ts";
 
 describe("T3 orchestration provider instructions", () => {
+  it("uses catalog policy and gives managed mode an explicit native denial", () => {
+    assert.include(T3_CODE_ORCHESTRATION_INSTRUCTIONS, "delegation mode");
+    assert.include(t3DelegationInstructions("t3-managed"), "Native agent launches are disabled");
+    assert.include(
+      t3DelegationInstructions("t3-managed"),
+      "Use `delegate_task` for all child work",
+    );
+    assert.notInclude(
+      t3DelegationInstructions("native-preferred"),
+      "Native agent launches are disabled",
+    );
+  });
+
+  it("reports missing tools in managed mode and omits unavailable native guidance", () => {
+    assert.equal(t3DelegationInstructions("native-preferred", false), "");
+    assert.include(
+      t3DelegationInstructions("t3-managed", false),
+      "Native agent launches are disabled",
+    );
+    assert.include(
+      t3DelegationInstructions("t3-managed", false),
+      "T3 delegation tools are not attached",
+    );
+    assert.include(t3DelegationInstructions("t3-managed", false), "Report the missing capability");
+  });
+
   it("distinguishes delegated subagents from ordinary top-level threads", () => {
     assert.include(T3_CODE_ORCHESTRATION_INSTRUCTIONS, "Use `delegate_task`");
     assert.include(T3_CODE_ORCHESTRATION_INSTRUCTIONS, "ordinary top-level T3 conversations");

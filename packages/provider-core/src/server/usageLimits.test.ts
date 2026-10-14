@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vite-plus/test";
+import { describe, expect, it, test } from "vite-plus/test";
 
 import { applyUsageLimitsUpdate, resolveUsageLimitsAfterProbe } from "./usageLimits.ts";
 
@@ -50,6 +50,36 @@ describe("applyUsageLimitsUpdate", () => {
       checkedAt: "2026-09-03T12:00:05.000Z",
       windows: [{ ...session, usedPercent: 55 }, weekly],
     });
+  });
+
+  test("applies a model-family-only change and keeps unrelated quota data", () => {
+    const resetCredits = { availableCount: 2 };
+    const previous = { ...published, resetCredits };
+    const next = applyUsageLimitsUpdate({
+      previous,
+      checkedAt: "2026-09-03T12:00:05.000Z",
+      update: { windows: [{ ...weekly, modelFamily: "claude-opus" }] },
+    });
+    expect(next).not.toBe(previous);
+    expect(next).toEqual({
+      checkedAt: "2026-09-03T12:00:05.000Z",
+      windows: [session, { ...weekly, modelFamily: "claude-opus" }],
+      resetCredits,
+    });
+  });
+
+  test("clears a prior model scope when the replacement quota is shared", () => {
+    const previous = { checkedAt, windows: [{ ...session, modelFamily: "claude-opus" }, weekly] };
+    const next = applyUsageLimitsUpdate({
+      previous,
+      checkedAt: "2026-09-03T12:00:05.000Z",
+      update: {
+        windows: [{ id: "five_hour", kind: "session", label: "Session", usedPercent: 40 }],
+      },
+    });
+    expect(next).not.toBe(previous);
+    expect(next).toEqual({ checkedAt: "2026-09-03T12:00:05.000Z", windows: [session, weekly] });
+    expect(next?.windows[0]).not.toHaveProperty("modelFamily");
   });
 
   it("leaves an unsupported account and an empty update alone", () => {

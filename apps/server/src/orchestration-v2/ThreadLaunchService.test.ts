@@ -1,3 +1,4 @@
+import { makeDelegationFixtures } from "./testkit/DelegationFixtures.ts";
 import * as Scheduler from "../scheduling/Scheduler.ts";
 import * as WorktreeSetupTracker from "../project/WorktreeSetupTracker.ts";
 import * as ProjectCloneTracker from "../project/ProjectCloneTracker.ts";
@@ -128,6 +129,8 @@ function makeHarness(options: HarnessOptions = {}) {
   const layerThreadManagement = ThreadManagement.layer.pipe(
     Layer.provide(layerOrchestrator),
     Layer.provide(layerServerSettings),
+    Layer.provide(layerRegistry),
+    Layer.provide(ProviderRegistryMock.layer(options.providers)),
     Layer.provide(layerReceipts),
   );
   const layerOutbox = EffectOutbox.layer.pipe(Layer.provide(layerDatabase));
@@ -2746,6 +2749,13 @@ it.effect.each(
             )
           : Effect.succeed({ commitSha: "parent-local-commit" }),
       );
+      const delegationFixtures = makeDelegationFixtures([
+        {
+          instanceId: childInstanceId,
+          model: "child-model",
+          driver: ProviderDriverKind.make(driver),
+        },
+      ]);
       const harness = makeHarness({
         closeTerminal: () => Deferred.succeed(terminalClosed, undefined).pipe(Effect.asVoid),
         adapters: [
@@ -2753,26 +2763,13 @@ it.effect.each(
           { ...adapter, instanceId: childInstanceId, driver: ProviderDriverKind.make(driver) },
         ],
         serverSettings: {
+          delegationPolicy: delegationFixtures.policy,
           providerInstances: {
             [childInstanceId]: { driver: ProviderDriverKind.make(driver), config: {} },
           },
         },
         hasCommit: () => Effect.succeed(true),
-        providers: [
-          {
-            instanceId: childInstanceId,
-            driver: ProviderDriverKind.make(driver),
-            enabled: true,
-            installed: true,
-            version: "test",
-            checkedAt: "2026-10-13T00:00:00.000Z",
-            slashCommands: [],
-            skills: [],
-            status: "ready",
-            auth: { status: "authenticated" },
-            models: [{ slug: "child-model", name: "Child", isCustom: true, capabilities: null }],
-          },
-        ],
+        providers: delegationFixtures.providers,
         runSetup: () =>
           cancelSetup
             ? Effect.succeed({

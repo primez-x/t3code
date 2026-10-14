@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vite-plus/test";
+import { describe, expect, test } from "vite-plus/test";
 
 import { claudeRateLimitEventToUpdate, claudeUsageResponseToLimits } from "./claudeUsageLimits.ts";
 
@@ -6,7 +6,7 @@ const checkedAt = "2026-07-18T10:00:00.000Z";
 const noNames = { overageIncluded: undefined } as const;
 
 describe("claudeUsageResponseToLimits", () => {
-  it("maps the session, weekly, and model-scoped weekly windows", () => {
+  test("maps the session, weekly, and model-scoped weekly windows", () => {
     expect(
       claudeUsageResponseToLimits({
         checkedAt,
@@ -56,18 +56,27 @@ describe("claudeUsageResponseToLimits", () => {
           },
           {
             id: "seven_day_fable",
+            modelFamily: "claude-fable",
             kind: "weekly",
             label: "Weekly · Fable",
             usedPercent: 73,
             windowDurationMins: 10080,
             resetsAt: "2026-07-24T08:59:00.000Z",
           },
+          {
+            id: "seven_day_opus",
+            modelFamily: "claude-opus",
+            kind: "weekly",
+            label: "Weekly · Opus",
+            usedPercent: 3,
+            windowDurationMins: 10080,
+          },
         ],
       },
     });
   });
 
-  it("names the overage-included bucket only from a scoped entry that drew a row", () => {
+  test("names the overage-included bucket only from a scoped entry that drew a row", () => {
     expect(
       claudeUsageResponseToLimits({
         checkedAt,
@@ -86,7 +95,7 @@ describe("claudeUsageResponseToLimits", () => {
     ).toEqual({ overageIncluded: "Fable" });
   });
 
-  it("reports API key and Bedrock accounts as unsupported", () => {
+  test("reports API key and Bedrock accounts as unsupported", () => {
     expect(
       claudeUsageResponseToLimits({
         checkedAt,
@@ -95,7 +104,7 @@ describe("claudeUsageResponseToLimits", () => {
     ).toEqual({ checkedAt, windows: [], unavailable: { reason: "unsupported" } });
   });
 
-  it("skips a window the endpoint reports without a utilization", () => {
+  test("skips a window the endpoint reports without a utilization", () => {
     expect(
       claudeUsageResponseToLimits({
         checkedAt,
@@ -120,7 +129,7 @@ describe("claudeUsageResponseToLimits", () => {
 });
 
 describe("claudeRateLimitEventToUpdate", () => {
-  it("scales the 0–1 utilization and epoch-second reset onto the probe's window id", () => {
+  test("scales the 0–1 utilization and epoch-second reset onto the probe's window id", () => {
     expect(
       claudeRateLimitEventToUpdate(
         {
@@ -145,18 +154,22 @@ describe("claudeRateLimitEventToUpdate", () => {
     });
   });
 
-  it("lands the streamed overage-included bucket on the row the probe named", () => {
+  test("lands the streamed overage-included bucket on the row the probe named", () => {
     const event = {
       status: "allowed",
       rateLimitType: "seven_day_overage_included" as never,
       utilization: 0.4,
     } as const;
-    // No probe has named the bucket yet: guessing would open a stray row.
-    expect(claudeRateLimitEventToUpdate(event, noNames)).toBeUndefined();
+    expect(claudeRateLimitEventToUpdate(event, noNames)?.windows[0]).toMatchObject({
+      id: "seven_day_overage_included",
+      modelFamily: "unrecognized",
+      usedPercent: 40,
+    });
     expect(claudeRateLimitEventToUpdate(event, { overageIncluded: "Fable" })).toEqual({
       windows: [
         {
           id: "seven_day_fable",
+          modelFamily: "claude-fable",
           kind: "weekly",
           label: "Weekly · Fable",
           usedPercent: 40,
@@ -166,15 +179,249 @@ describe("claudeRateLimitEventToUpdate", () => {
     });
   });
 
-  it("ignores windows the page does not render and events without a utilization", () => {
+  test("maps legacy scoped events and ignores events without utilization", () => {
     expect(
       claudeRateLimitEventToUpdate(
         { status: "allowed", rateLimitType: "seven_day_opus", utilization: 0.1 },
         noNames,
       ),
-    ).toBeUndefined();
+    ).toMatchObject({
+      windows: [{ id: "seven_day_opus", modelFamily: "claude-opus", usedPercent: 10 }],
+    });
     expect(
       claudeRateLimitEventToUpdate({ status: "rejected", rateLimitType: "five_hour" }, noNames),
     ).toBeUndefined();
   });
+});
+
+describe("Claude quota scopes", () => {
+  test("preserves all legacy scoped families beside shared quotas", () => {
+    const limits = claudeUsageResponseToLimits({
+      checkedAt,
+      response: {
+        rate_limits_available: true,
+        rate_limits: {
+          seven_day: { utilization: 10, resets_at: null },
+          seven_day_opus: { utilization: 100, resets_at: null },
+          seven_day_sonnet: { utilization: 30, resets_at: null },
+          ...({
+            seven_day_haiku: { utilization: 0, resets_at: null },
+            seven_day_fable: { utilization: 120, resets_at: null },
+          } as object),
+        },
+      },
+    }).limits;
+    expect(
+      limits.windows.map(({ id, modelFamily, usedPercent }) => ({ id, modelFamily, usedPercent })),
+    ).toEqual([
+      { id: "seven_day", modelFamily: undefined, usedPercent: 10 },
+      { id: "seven_day_fable", modelFamily: "claude-fable", usedPercent: 100 },
+      { id: "seven_day_haiku", modelFamily: "claude-haiku", usedPercent: 0 },
+      { id: "seven_day_opus", modelFamily: "claude-opus", usedPercent: 100 },
+      { id: "seven_day_sonnet", modelFamily: "claude-sonnet", usedPercent: 30 },
+    ]);
+  });
+
+  test("keeps unrelated unknown scopes distinct and suppresses private labels", () => {
+    const response = {
+      rate_limits_available: true,
+      rate_limits: {
+        model_scoped: [
+          { display_name: "secret/customer-one", utilization: 100, resets_at: null },
+          { display_name: "secret customer one", utilization: 25, resets_at: null },
+          { display_name: "Fable", utilization: 55, resets_at: null },
+        ],
+      },
+    };
+    const result = claudeUsageResponseToLimits({ checkedAt, response });
+    const unknown = result.limits.windows.filter((window) => window.modelFamily === "unrecognized");
+    expect(unknown).toHaveLength(2);
+    expect(new Set(unknown.map((window) => window.id)).size).toBe(2);
+    expect(unknown.map((window) => window.usedPercent).sort((a, b) => a - b)).toEqual([25, 100]);
+    expect(unknown.every((window) => window.label === "Weekly · Unrecognized model")).toBe(true);
+    expect(JSON.stringify(result.limits)).not.toContain("secret");
+    expect(result.names).toEqual({ overageIncluded: "Fable" });
+    expect(
+      claudeRateLimitEventToUpdate(
+        {
+          status: "allowed",
+          rateLimitType: "seven_day_overage_included",
+          utilization: 0.9,
+        },
+        result.names,
+      )?.windows[0]?.id,
+    ).toBe("seven_day_fable");
+    const second = claudeUsageResponseToLimits({
+      checkedAt,
+      response: {
+        ...response,
+        rate_limits: { model_scoped: response.rate_limits.model_scoped.toReversed() },
+      },
+    });
+    expect(second.limits).toEqual(result.limits);
+  });
+
+  test("ignores a malformed scoped container while retaining shared quotas", () => {
+    const { limits } = claudeUsageResponseToLimits({
+      checkedAt,
+      response: {
+        rate_limits_available: true,
+        rate_limits: {
+          seven_day: { utilization: 100, resets_at: null },
+          model_scoped: { display_name: "private", utilization: 100 } as never,
+        },
+      },
+    });
+    expect(limits.windows).toEqual([
+      {
+        id: "seven_day",
+        kind: "weekly",
+        label: "Weekly",
+        usedPercent: 100,
+        windowDurationMins: 10080,
+      },
+    ]);
+  });
+
+  test("retains unknown legacy scopes and streamed scope identities", () => {
+    const { limits } = claudeUsageResponseToLimits({
+      checkedAt,
+      response: {
+        rate_limits_available: true,
+        rate_limits: {
+          ...({ seven_day_private_customer: { utilization: 100, resets_at: null } } as object),
+        },
+      },
+    });
+    const update = claudeRateLimitEventToUpdate(
+      {
+        status: "rejected",
+        rateLimitType: "seven_day_private_customer" as never,
+        utilization: 1,
+      },
+      noNames,
+    );
+    expect(limits.windows).toHaveLength(1);
+    expect(limits.windows[0]?.modelFamily).toBe("unrecognized");
+    expect(update?.windows[0]?.id).toBe(limits.windows[0]?.id);
+    expect(JSON.stringify(limits)).not.toContain("private_customer");
+  });
+
+  test("keeps an unnamed event separate when multiple Fable buckets exist", () => {
+    const { names, limits } = claudeUsageResponseToLimits({
+      checkedAt,
+      response: {
+        rate_limits_available: true,
+        rate_limits: {
+          model_scoped: [
+            { display_name: "Fable 1", utilization: 100, resets_at: null },
+            { display_name: "Fable 2", utilization: 20, resets_at: null },
+          ],
+        },
+      },
+    });
+    expect(names).toEqual(noNames);
+    expect(limits.windows.map((window) => window.id)).toEqual([
+      "seven_day_fable_1",
+      "seven_day_fable_2",
+    ]);
+    expect(
+      claudeRateLimitEventToUpdate(
+        {
+          status: "rejected",
+          rateLimitType: "seven_day_overage_included",
+          utilization: 1,
+        },
+        names,
+      )?.windows[0]?.id,
+    ).toBe("seven_day_overage_included");
+  });
+
+  test("keeps ambiguous unknown scope events separate from unrelated buckets", () => {
+    const { names } = claudeUsageResponseToLimits({
+      checkedAt,
+      response: {
+        rate_limits_available: true,
+        rate_limits: {
+          model_scoped: [
+            { display_name: "private A", utilization: 100, resets_at: null },
+            { display_name: "private B", utilization: 20, resets_at: null },
+          ],
+        },
+      },
+    });
+    expect(names).toEqual(noNames);
+  });
+
+  test("does not mistake private names containing a known family for a known scope", () => {
+    const { limits } = claudeUsageResponseToLimits({
+      checkedAt,
+      response: {
+        rate_limits_available: true,
+        rate_limits: {
+          model_scoped: [
+            { display_name: "Fable customer-secret", utilization: 100, resets_at: null },
+          ],
+        },
+      },
+    });
+    expect(limits.windows[0]?.modelFamily).toBe("unrecognized");
+    expect(JSON.stringify(limits)).not.toContain("customer-secret");
+  });
+
+  test("keeps per-instance event scope names independent", () => {
+    const first = claudeUsageResponseToLimits({
+      checkedAt,
+      response: {
+        rate_limits_available: true,
+        rate_limits: { model_scoped: [{ display_name: "Fable", utilization: 1, resets_at: null }] },
+      },
+    });
+    const second = claudeUsageResponseToLimits({
+      checkedAt,
+      response: {
+        rate_limits_available: true,
+        rate_limits: { model_scoped: [{ display_name: "Opus", utilization: 2, resets_at: null }] },
+      },
+    });
+    const event = {
+      status: "allowed",
+      rateLimitType: "seven_day_overage_included",
+      utilization: 0.5,
+    } as const;
+    expect(claudeRateLimitEventToUpdate(event, first.names)?.windows[0]?.modelFamily).toBe(
+      "claude-fable",
+    );
+    expect(claudeRateLimitEventToUpdate(event, second.names)?.windows[0]?.modelFamily).toBe(
+      "claude-opus",
+    );
+  });
+
+  test.each([-1, NaN, Infinity])(
+    "rejects invalid utilization rather than inventing zero: %j",
+    (value) => {
+      expect(
+        claudeUsageResponseToLimits({
+          checkedAt,
+          response: {
+            rate_limits_available: true,
+            rate_limits: {
+              seven_day: { utilization: value, resets_at: null },
+              model_scoped: [{ display_name: "Fable", utilization: value, resets_at: null }],
+            },
+          },
+        }).limits.windows,
+      ).toEqual([]);
+      expect(
+        claudeRateLimitEventToUpdate(
+          {
+            status: "allowed",
+            rateLimitType: "seven_day",
+            utilization: value,
+          },
+          noNames,
+        ),
+      ).toBeUndefined();
+    },
+  );
 });

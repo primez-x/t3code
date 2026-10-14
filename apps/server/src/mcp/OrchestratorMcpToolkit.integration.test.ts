@@ -1,3 +1,4 @@
+import { makeDelegationFixtures } from "../orchestration-v2/testkit/DelegationFixtures.ts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { describe, expect, it } from "@effect/vitest";
 import { AjvJsonSchemaValidator } from "@modelcontextprotocol/sdk/validation/ajv";
@@ -130,6 +131,20 @@ const claudeSelection = {
   model: claudeModel,
 } satisfies ModelSelection;
 
+const toolkitDelegationFixtures = makeDelegationFixtures([
+  { ...codexSelection, driver: ProviderDriverKind.make("codex") },
+  { ...claudeSelection, driver: ProviderDriverKind.make("claudeAgent") },
+]);
+const toolkitDelegationPolicy = {
+  ...toolkitDelegationFixtures.policy,
+  routes: [
+    ...toolkitDelegationFixtures.policy.routes,
+    ...toolkitDelegationFixtures.policy.routes
+      .filter((route) => route.driver === "codex")
+      .map((route) => ({ ...route, effort: "low" as const })),
+  ],
+};
+
 const delegatedTaskStatusTranscriptFile = new URL(
   "../orchestration-v2/testkit/fixtures/delegated_task_status/codex_transcript.ndjson",
   import.meta.url,
@@ -141,7 +156,22 @@ const readDelegatedTaskStatusTranscript = Effect.fn("readDelegatedTaskStatusTran
     const text = yield* fs.readFileString(
       decodeURIComponent(delegatedTaskStatusTranscriptFile.pathname),
     );
-    return yield* decodeProviderReplayNdjson(text);
+    const transcript = yield* decodeProviderReplayNdjson(text);
+    const decodeFrame = Schema.decodeUnknownEffect(Schema.Record(Schema.String, Schema.Unknown));
+    const entries = yield* Effect.forEach(transcript.entries, (entry) =>
+      Effect.gen(function* () {
+        if (
+          entry.type !== "expect_outbound" ||
+          !entry.label?.startsWith("child.") ||
+          !entry.label.endsWith("turn/start")
+        )
+          return entry;
+        const frame = yield* decodeFrame(entry.frame);
+        const params = yield* decodeFrame(frame.params);
+        return { ...entry, frame: { ...frame, params: { ...params, effort: "medium" } } };
+      }),
+    );
+    return { ...transcript, entries };
   },
   Effect.provide(NodeServices.layer),
 );
@@ -176,10 +206,16 @@ function makeProviderSnapshot(input: {
         slug: input.model,
         name: input.model,
         isCustom: false,
-        capabilities:
-          input.optionDescriptors === undefined
-            ? null
-            : { optionDescriptors: input.optionDescriptors },
+        capabilities: {
+          optionDescriptors: input.optionDescriptors ?? [
+            {
+              id: input.driver === "codex" ? "reasoningEffort" : "effort",
+              label: "Reasoning effort",
+              type: "select",
+              options: [{ id: "medium", label: "Medium" }],
+            },
+          ],
+        },
       },
     ],
     slashCommands: [],
@@ -619,16 +655,6 @@ describe("orchestrator MCP toolkit", () => {
             },
             layerRegistry,
           ).pipe(Layer.provide(layerContinuationProbe));
-          const layerOrchestration = Layer.merge(
-            layerOrchestrator,
-            ThreadManagementService.layer.pipe(
-              Layer.provide(layerOrchestrator),
-              Layer.provide(ServerSettings.layerTest()),
-              Layer.provide(
-                CommandReceiptStore.layer.pipe(Layer.provide(SqlitePersistence.layerMemory)),
-              ),
-            ),
-          );
           const layerProviderRegistry = ProviderRegistryMock.layer([
             makeProviderSnapshot({
               instanceId: codexInstanceId,
@@ -636,7 +662,7 @@ describe("orchestrator MCP toolkit", () => {
               model: codexModel,
               optionDescriptors: [
                 {
-                  id: "reasoning",
+                  id: "reasoningEffort",
                   label: "Reasoning effort",
                   type: "select",
                   options: [
@@ -658,6 +684,22 @@ describe("orchestrator MCP toolkit", () => {
               model: "opencode/test",
             }),
           ]);
+          const layerOrchestration = Layer.merge(
+            layerOrchestrator,
+            ThreadManagementService.layer.pipe(
+              Layer.provide(layerOrchestrator),
+              Layer.provide(layerRegistry),
+              Layer.provide(layerProviderRegistry),
+              Layer.provide(
+                ServerSettings.layerTest({
+                  delegationPolicy: toolkitDelegationPolicy,
+                }),
+              ),
+              Layer.provide(
+                CommandReceiptStore.layer.pipe(Layer.provide(SqlitePersistence.layerMemory)),
+              ),
+            ),
+          );
           // In-memory ScheduledTaskService stub so the schedule/list/update/
           // delete tools can be exercised without SQL/launch wiring.
           const scheduledStore = yield* Ref.make<ReadonlyArray<ScheduledTask>>([]);
@@ -696,7 +738,11 @@ describe("orchestrator MCP toolkit", () => {
             Layer.provideMerge(layerOrchestration),
             Layer.provide(layerRegistry),
             Layer.provide(layerProviderRegistry),
-            Layer.provide(ServerSettings.layerTest()),
+            Layer.provide(
+              ServerSettings.layerTest({
+                delegationPolicy: toolkitDelegationPolicy,
+              }),
+            ),
             Layer.provide(layerScheduledTaskStub),
             Layer.provide(Layer.mock(ThreadSearch.ThreadSearch)({})),
             Layer.provide(
@@ -1501,7 +1547,9 @@ describe("orchestrator MCP toolkit", () => {
                   models: [
                     expect.objectContaining({
                       id: codexModel,
-                      options: [expect.objectContaining({ id: "reasoning", type: "select" })],
+                      options: expect.arrayContaining([
+                        expect.objectContaining({ id: "reasoningEffort", type: "select" }),
+                      ]),
                     }),
                   ],
                 }),
@@ -1759,7 +1807,10 @@ describe("orchestrator MCP toolkit", () => {
               createdBy: "agent",
               creationSource: "mcp",
             });
-            expect(child.thread.modelSelection).toEqual(claudeSelection);
+            expect(child.thread.modelSelection).toEqual({
+              ...claudeSelection,
+              options: [{ id: "effort", value: "medium" }],
+            });
             expect(
               child.messages
                 .filter((message) => message.role === "user")
@@ -1968,6 +2019,10 @@ describe("orchestrator MCP toolkit", () => {
               mode: "async",
               clientRequestId: "delegate-claude-1",
             });
+            expect(
+              repeatedDelegatedCall.isError,
+              JSON.stringify(repeatedDelegatedCall.content),
+            ).toBe(false);
             const repeatedDelegated = yield* decodeDelegateTaskResult(
               repeatedDelegatedCall.structuredContent,
             ).pipe(Effect.orDie);
@@ -1985,7 +2040,7 @@ describe("orchestrator MCP toolkit", () => {
               target: {
                 providerInstanceId: codexInstanceId,
                 model: codexModel,
-                options: { reasoning: "extreme" },
+                options: { reasoningEffort: "extreme" },
               },
               mode: "async",
               clientRequestId: "delegate-rejected-options-1",
@@ -2004,8 +2059,8 @@ describe("orchestrator MCP toolkit", () => {
                 providerInstanceId: codexInstanceId,
                 model: codexModel,
                 options: [
-                  { id: "reasoning", value: "low" },
-                  { id: "reasoning", value: "high" },
+                  { id: "reasoningEffort", value: "low" },
+                  { id: "reasoningEffort", value: "high" },
                 ],
               },
               mode: "async",
@@ -2023,11 +2078,12 @@ describe("orchestrator MCP toolkit", () => {
                 providerInstanceId: codexInstanceId,
                 model: codexModel,
                 // Shorthand record form; decodes to the canonical array.
-                options: { reasoning: "low" },
+                options: { reasoningEffort: "low" },
               },
               mode: "async",
               clientRequestId: "delegate-cancel-1",
             });
+            expect(cancellableCall.isError, JSON.stringify(cancellableCall.content)).toBe(false);
             const cancellable = yield* decodeDelegateTaskResult(
               cancellableCall.structuredContent,
             ).pipe(Effect.orDie);
@@ -2057,7 +2113,7 @@ describe("orchestrator MCP toolkit", () => {
             expect(optionedChild.thread.modelSelection).toEqual({
               instanceId: codexInstanceId,
               model: codexModel,
-              options: [{ id: "reasoning", value: "low" }],
+              options: [{ id: "reasoningEffort", value: "low" }],
             });
             const cancelCall = yield* invoke("task_cancel", {
               taskId: cancellable.taskId,
@@ -2692,6 +2748,7 @@ describe("orchestrator MCP toolkit", () => {
               timeoutMs: 1,
               clientRequestId: "delegate-wait-upgrade-1",
             });
+            expect(upgradedCall.isError, JSON.stringify(upgradedCall.content)).toBe(false);
             const upgradedDelegated = yield* decodeDelegateTaskResult(
               upgradedCall.structuredContent,
             ).pipe(Effect.orDie);
@@ -3828,16 +3885,6 @@ describe("orchestrator MCP toolkit", () => {
           },
           CodexOrchestratorReplayHarness,
         );
-        const layerOrchestration = Layer.merge(
-          layerOrchestrator,
-          ThreadManagementService.layer.pipe(
-            Layer.provide(layerOrchestrator),
-            Layer.provide(ServerSettings.layerTest()),
-            Layer.provide(
-              CommandReceiptStore.layer.pipe(Layer.provide(SqlitePersistence.layerMemory)),
-            ),
-          ),
-        );
         const layerProviderRegistry = ProviderRegistryMock.layer([
           makeProviderSnapshot({
             instanceId: codexInstanceId,
@@ -3845,6 +3892,26 @@ describe("orchestrator MCP toolkit", () => {
             model: codexModel,
           }),
         ]);
+        const layerOrchestration = Layer.merge(
+          layerOrchestrator,
+          ThreadManagementService.layer.pipe(
+            Layer.provide(layerOrchestrator),
+            Layer.provide(
+              CodexOrchestratorReplayHarness.makeProviderAdapterRegistryLayer(transcript).pipe(
+                Layer.provide(McpProviderSessions.layer),
+              ),
+            ),
+            Layer.provide(layerProviderRegistry),
+            Layer.provide(
+              ServerSettings.layerTest({
+                delegationPolicy: toolkitDelegationPolicy,
+              }),
+            ),
+            Layer.provide(
+              CommandReceiptStore.layer.pipe(Layer.provide(SqlitePersistence.layerMemory)),
+            ),
+          ),
+        );
         const layerTest = layerOrchestratorToolkit.pipe(
           Layer.provideMerge(McpServer.McpServer.layer),
           Layer.provideMerge(layerOrchestration),
@@ -3854,7 +3921,11 @@ describe("orchestrator MCP toolkit", () => {
             ),
           ),
           Layer.provide(layerProviderRegistry),
-          Layer.provide(ServerSettings.layerTest()),
+          Layer.provide(
+            ServerSettings.layerTest({
+              delegationPolicy: toolkitDelegationPolicy,
+            }),
+          ),
           Layer.provide(layerUnusedScheduledTaskStub),
           Layer.provide(Layer.mock(ProjectService.ProjectService)({})),
           Layer.provideMerge(

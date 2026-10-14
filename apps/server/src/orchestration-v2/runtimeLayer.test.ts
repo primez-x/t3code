@@ -17,6 +17,7 @@ import {
   RuntimeRequestId,
   TurnItemId,
   type ModelSelection,
+  type ServerProvider,
   type OrchestrationV2Run,
   ProjectId,
   type PullRequestDetail,
@@ -51,6 +52,7 @@ import * as ProjectEnrichmentService from "../project/ProjectEnrichmentService.t
 import * as ProjectService from "../project/ProjectService.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as McpSessionRegistryTestkit from "../mcp/McpSessionRegistry.testkit.ts";
+import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
 import * as ProviderInstanceRegistry from "../provider/ProviderInstanceRegistry.ts";
 import type { ProviderInstance } from "@t3tools/provider-core/server/driver";
 import * as VcsDriverRegistry from "../vcs/VcsDriverRegistry.ts";
@@ -265,6 +267,40 @@ const moveProject = (projectId: ProjectId, workspaceRoot: string, updatedAt: str
     }),
   );
 
+const delegationSnapshot: ServerProvider = {
+  instanceId: modelSelection.instanceId,
+  driver,
+  enabled: true,
+  installed: true,
+  version: null,
+  status: "ready",
+  auth: { status: "authenticated" },
+  checkedAt: "2026-10-14T12:00:00Z",
+  models: [
+    {
+      slug: "gpt-6.1-sol",
+      name: "Sol",
+      isCustom: false,
+      capabilities: {
+        optionDescriptors: [
+          {
+            id: "reasoningEffort",
+            label: "Effort",
+            type: "select",
+            options: [{ id: "high", label: "High" }],
+          },
+        ],
+      },
+    },
+  ],
+  slashCommands: [],
+  skills: [],
+};
+const layerProviderRegistryTest = Layer.mock(ProviderRegistry.ProviderRegistry)({
+  getProviders: Effect.succeed([delegationSnapshot]),
+  refreshInstance: () => Effect.succeed([delegationSnapshot]),
+});
+
 const layerTest = Layer.mergeAll(
   RuntimeLayer.layer,
   RuntimeLayer.layerEventSink,
@@ -278,7 +314,8 @@ const layerTest = Layer.mergeAll(
   Layer.provide(SqlitePersistence.layerMemory),
   Layer.provide(layerCheckpointStoreTest),
   Layer.provide(layerServerConfig),
-  Layer.provide(ServerSettings.layerTest()),
+  Layer.provide(layerProviderRegistryTest),
+  Layer.provideMerge(ServerSettings.layerTest()),
   Layer.provide(layerTestProviderInstanceRegistry),
   Layer.provide(layerGitWorkflowTest),
   Layer.provide(layerProjectServiceTest),
@@ -291,6 +328,7 @@ const layerLegacyImportTest = RuntimeLayer.layer.pipe(
   Layer.provideMerge(SqlitePersistence.layerMemory),
   Layer.provide(layerCheckpointStoreTest),
   Layer.provide(layerServerConfig),
+  Layer.provide(layerProviderRegistryTest),
   Layer.provide(ServerSettings.layerTest()),
   Layer.provide(layerTestProviderInstanceRegistry),
   Layer.provide(layerGitWorkflowTest),
@@ -331,6 +369,7 @@ const layerProjectDeletionTest = Layer.mergeAll(
   Layer.provide(SqlitePersistence.layerMemory),
   Layer.provide(layerCheckpointStoreTest),
   Layer.provide(layerServerConfig),
+  Layer.provide(layerProviderRegistryTest),
   Layer.provide(ServerSettings.layerTest()),
   Layer.provide(layerTestProviderInstanceRegistry),
   Layer.provide(layerGitWorkflowTest),
@@ -476,6 +515,7 @@ const layerSharedApplicationDataPlaneTest = Layer.mergeAll(
   Layer.provideMerge(SqlitePersistence.layerMemory),
   Layer.provide(layerCheckpointStoreTest),
   Layer.provide(layerServerConfig),
+  Layer.provide(layerProviderRegistryTest),
   Layer.provide(ServerSettings.layerTest()),
   Layer.provide(layerTestProviderInstanceRegistry),
   Layer.provide(layerGitWorkflowTest),
@@ -5714,6 +5754,7 @@ const layerQueueResumeDisabledInstanceTest = Layer.mergeAll(
   Layer.provide(SqlitePersistence.layerMemory),
   Layer.provide(layerCheckpointStoreTest),
   Layer.provide(layerServerConfig),
+  Layer.provide(layerProviderRegistryTest),
   Layer.provide(
     ServerSettings.layerTest({
       providerInstances: {
@@ -5826,3 +5867,99 @@ it.layer(layerQueueResumeDisabledInstanceTest)(
     );
   },
 );
+
+it.layer(layerTest)("delegation policy event persistence", (it) => {
+  it.effect(
+    "persists the selected target and decision and replays unchanged after policy and target changes",
+    () =>
+      Effect.gen(function* () {
+        const threads = yield* ThreadManagementService.ThreadManagementService;
+        const settings = yield* ServerSettings.ServerSettingsService;
+        const threadId = ThreadId.make("thread:central-delegation-persistence");
+        yield* seedProject({
+          projectId: ProjectId.make("project:central-delegation-persistence"),
+          title: "Delegation",
+          workspaceRoot: "/tmp/delegation",
+          defaultModelSelection: modelSelection,
+          createdAt: "2026-10-14T12:00:00Z",
+        });
+        yield* threads.dispatch({
+          type: "thread.create",
+          commandId: CommandId.make("central-delegation-create"),
+          threadId,
+          projectId: ProjectId.make("project:central-delegation-persistence"),
+          title: "Parent",
+          modelSelection,
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: null,
+          createdBy: "user",
+          creationSource: "web",
+        });
+        yield* threads.dispatch({
+          type: "message.dispatch",
+          commandId: CommandId.make("central-delegation-parent-turn"),
+          threadId,
+          messageId: MessageId.make("central-delegation-parent-message"),
+          text: "Implement the change",
+          attachments: [],
+          dispatchMode: { type: "start_immediately" },
+          createdBy: "user",
+          creationSource: "web",
+        });
+        const parent = yield* threads.getThreadRecords(threadId, ["runs"]);
+        const run = parent.runs[0]!;
+        const command = {
+          type: "delegated_task.request" as const,
+          commandId: CommandId.make("central-delegation-child"),
+          parentThreadId: threadId,
+          parentRunId: run.id,
+          parentNodeId: run.rootNodeId!,
+          task: "Implement the bounded change",
+          modelSelection,
+          runtimeMode: "full-access" as const,
+          interactionMode: "default" as const,
+          role: "implementation" as const,
+          createdBy: "agent" as const,
+          creationSource: "mcp" as const,
+        };
+        const first = yield* threads.dispatch(command);
+        const record = (yield* threads.getThreadRecords(threadId, ["subagents"])).subagents[0]!;
+        assert.equal(record.model, "gpt-6.1-sol");
+        assert.deepEqual(record.modelSelection, {
+          instanceId: modelSelection.instanceId,
+          model: "gpt-6.1-sol",
+          options: [{ id: "reasoningEffort", value: "high" }],
+        });
+        assert.equal(record.delegationRole, "implementation");
+        assert.equal(record.capability, "coding");
+        assert.equal(record.routingDecision?.capability, "coding");
+        yield* settings.updateSettings({
+          delegationPolicy: { mode: "t3-managed", routes: [] },
+          providerInstances: { [modelSelection.instanceId]: { driver, enabled: false } },
+        });
+        const replay = yield* threads.dispatch({
+          ...command,
+          modelSelection: {
+            instanceId: ProviderInstanceId.make("missing"),
+            model: "unmapped",
+            options: [{ id: "reasoningEffort", value: "max" }],
+          },
+        });
+        assert.equal(replay.sequence, first.sequence);
+        assert.deepEqual(
+          replay.storedEvents.map((stored) => stored.event.id),
+          first.storedEvents.map((stored) => stored.event.id),
+        );
+        assert.deepEqual(
+          replay.storedEvents.find((stored) => stored.event.type === "subagent.updated"),
+          first.storedEvents.find((stored) => stored.event.type === "subagent.updated"),
+        );
+        assert.deepEqual(
+          (yield* threads.getThreadRecords(threadId, ["subagents"])).subagents[0],
+          record,
+        );
+      }),
+  );
+});

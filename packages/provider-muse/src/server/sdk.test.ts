@@ -15,6 +15,7 @@ import {
   createMuseSdkHostEffect,
   makeMuseEnvironment,
   museApprovalMode,
+  museServeArgs,
   museLaunch,
   museVerbatimPath,
   museWorkspaceRoot,
@@ -63,6 +64,22 @@ afterEach(() => {
 });
 
 describe("Muse SDK host", () => {
+  it("denies native child admission after serve without disabling shell or writes", () => {
+    expect(museServeArgs({ delegationMode: "t3-managed", runtimeMode: "full-access" })).toEqual([
+      "serve",
+      "-c",
+      'run.subagent_delegation_mode="off"',
+      "-c",
+      "agents.execution_capacity=1",
+      "--trust-workspace",
+      "--disable-sandbox",
+    ]);
+    expect(museServeArgs({ delegationMode: "native-preferred" })).toEqual([
+      "serve",
+      "--trust-workspace",
+    ]);
+  });
+
   it.each(["META_API_KEY", "meta_api_key", "Meta_Api_Key"])(
     "excludes %s without reading its value or mutating the supplied environment",
     (key) => {

@@ -2200,6 +2200,14 @@ export function GeneralSettingsPanel() {
   const hasServerTargets = connectedEnvironments.length > 0;
   const [backgroundActivityDialogOpen, setBackgroundActivityDialogOpen] = useState(false);
   const mixedResponseStreamingMode = useScopedSettingsMixed(["responseStreamingMode"]);
+  const delegationSettingIsMixed = (key: "mode" | "balanceUsage" | "preferAlternateProvider") =>
+    connectedEnvironments.some(
+      (target) =>
+        target.serverConfig?.settings.delegationPolicy[key] !== settings.delegationPolicy[key],
+    );
+  const mixedDelegationMode = delegationSettingIsMixed("mode");
+  const mixedDelegationUsage = delegationSettingIsMixed("balanceUsage");
+  const mixedDelegationDiversity = delegationSettingIsMixed("preferAlternateProvider");
   const lastEnabledProjectGroupingMode = useRef<SidebarProjectGroupingMode>(
     readLastEnabledProjectGroupingMode(),
   );
@@ -2515,6 +2523,84 @@ export function GeneralSettingsPanel() {
       </SettingsSection>
 
       <SettingsSection id="behavior" title="Behavior">
+        <SettingsRow
+          id="delegation-mode"
+          title="Delegation mode"
+          serverScoped
+          settingKeys={["delegationPolicy"]}
+          mixed={mixedDelegationMode}
+          description={
+            mixedDelegationMode
+              ? "The selected environments use different delegation settings. Changes apply to new delegated tasks and turns after the agent session refreshes. The root model stays unchanged."
+              : `${
+                  settings.delegationPolicy.mode === "native-preferred"
+                    ? "Use provider-native subagents when supported. T3 handles other assignments."
+                    : "T3 selects each delegated provider, model, and effort, and controls native subagent launches."
+                } Changes apply to new delegated tasks and turns after the agent session refreshes. The root model stays unchanged.`
+          }
+          control={
+            <Select
+              value={settings.delegationPolicy.mode}
+              onValueChange={(mode) => {
+                if (mode === "native-preferred" || mode === "t3-managed") {
+                  updateSettings({ delegationPolicy: { mode } });
+                }
+              }}
+            >
+              <SelectTrigger size="sm" className="w-full sm:w-40" aria-label="Delegation mode">
+                <SelectValue>
+                  {mixedDelegationMode
+                    ? "Mixed"
+                    : settings.delegationPolicy.mode === "native-preferred"
+                      ? "Native preferred"
+                      : "T3 managed"}
+                </SelectValue>
+              </SelectTrigger>
+              <SelectPopup align="end" alignItemWithTrigger={false}>
+                <SelectItem value="native-preferred">Native preferred</SelectItem>
+                <SelectItem value="t3-managed">T3 managed</SelectItem>
+              </SelectPopup>
+            </Select>
+          }
+        />
+        <SettingsRow
+          id="delegation-usage-balance"
+          title="Usage balance"
+          mixed={mixedDelegationUsage}
+          serverScoped
+          settingKeys={["delegationPolicy"]}
+          description="Favor capable models with more usage available. When off, remaining usage does not rank choices. Exhausted models remain excluded."
+          control={
+            <Switch
+              mixed={mixedDelegationUsage}
+              checked={!mixedDelegationUsage && settings.delegationPolicy.balanceUsage}
+              onCheckedChange={(balanceUsage) =>
+                updateSettings({ delegationPolicy: { balanceUsage } })
+              }
+              aria-label="Delegation usage balance"
+            />
+          }
+        />
+        <SettingsRow
+          id="delegation-model-diversity"
+          title="Model diversity"
+          mixed={mixedDelegationDiversity}
+          serverScoped
+          settingKeys={["delegationPolicy"]}
+          description="Favor another provider or model when usage is comparable or unknown. When off, choose by capability, usage, and cost. Both modes follow the same selection rules. T3 managed enforces those rules. Native preferred relies on agent instructions."
+          control={
+            <Switch
+              mixed={mixedDelegationDiversity}
+              checked={
+                !mixedDelegationDiversity && settings.delegationPolicy.preferAlternateProvider
+              }
+              onCheckedChange={(preferAlternateProvider) =>
+                updateSettings({ delegationPolicy: { preferAlternateProvider } })
+              }
+              aria-label="Delegation model diversity"
+            />
+          }
+        />
         <NotificationSettings />
         <SettingsRow
           {...searchableSetting("in-app-notifications")}

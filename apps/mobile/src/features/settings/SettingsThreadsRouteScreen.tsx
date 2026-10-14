@@ -17,6 +17,8 @@ import { useAtomCommand } from "../../state/use-atom-command";
 import { SettingsSection } from "./components/SettingsSection";
 import { SettingsProjectOverridesSection } from "./components/SettingsProjectOverridesSection";
 import { SettingsSwitchRow } from "./components/SettingsSwitchRow";
+import { SettingsChoiceRow } from "./components/SettingsChoiceRow";
+import type { ServerSettingsPatch } from "@t3tools/contracts";
 import { SettingsScreen } from "./components/SettingsScreen";
 import {
   AndroidSettingsEnvironmentFilter,
@@ -47,6 +49,7 @@ export function SettingsThreadsRouteScreen() {
           contentContainerStyle={{ paddingBottom: Math.max(insets.bottom, 18) + 18 }}
         >
           <AutoSettleSettingsRows />
+          <DelegationSettingsRows />
           <BetaSettingsSection />
           <LegacySettingsSection />
         </ScrollView>
@@ -56,6 +59,98 @@ export function SettingsThreadsRouteScreen() {
 }
 
 const AUTO_SETTLE_DEFAULT_DAYS = DEFAULT_SERVER_SETTINGS.sidebarAutoSettleAfterDays ?? 3;
+
+function DelegationSettingsRows() {
+  const { selectedTargets, selectedProjectKey } = useSettingsEnvironmentFilter();
+  const writableEnvironments = useEnvironmentsWithScope(selectedTargets, AuthSettingsWriteScope);
+  const [pending, setPending] = useState(false);
+  const writeInFlight = useRef(false);
+  const updateSettings = useAtomCommand(serverEnvironment.updateSettings, {
+    label: "delegation settings update",
+    reportFailure: true,
+  });
+  const reference = selectedTargets[0]?.serverConfig.settings.delegationPolicy;
+  if (!reference) return null;
+  const disabled =
+    pending ||
+    selectedProjectKey !== null ||
+    !selectedTargets.every((target) => writableEnvironments.has(target.environmentId));
+  const writeToAll = (delegationPolicy: NonNullable<ServerSettingsPatch["delegationPolicy"]>) => {
+    if (
+      writeInFlight.current ||
+      selectedProjectKey !== null ||
+      !selectedTargets.every((target) =>
+        readEnvironmentScope(target.environmentId, AuthSettingsWriteScope),
+      )
+    )
+      return;
+    writeInFlight.current = true;
+    setPending(true);
+    void Promise.allSettled(
+      selectedTargets.map((target) =>
+        updateSettings({
+          environmentId: target.environmentId,
+          input: { patch: { delegationPolicy } },
+        }),
+      ),
+    ).finally(() => {
+      writeInFlight.current = false;
+      setPending(false);
+    });
+  };
+  const uniform = <K extends "mode" | "balanceUsage" | "preferAlternateProvider">(key: K) =>
+    selectedTargets.every(
+      (target) => target.serverConfig.settings.delegationPolicy[key] === reference[key],
+    )
+      ? reference[key]
+      : null;
+
+  return (
+    <View className="gap-3">
+      <SettingsSection title="Delegation mode">
+        <SettingsChoiceRow
+          label="Native preferred"
+          description="Use provider-native subagents when supported. T3 handles other assignments."
+          selected={uniform("mode") === "native-preferred"}
+          disabled={disabled}
+          onPress={() => writeToAll({ mode: "native-preferred" })}
+        />
+        <SettingsChoiceRow
+          label="T3 managed"
+          description="T3 selects each delegated provider, model, and effort, and controls native subagent launches."
+          separated
+          selected={uniform("mode") === "t3-managed"}
+          disabled={disabled}
+          onPress={() => writeToAll({ mode: "t3-managed" })}
+        />
+        <SettingsSwitchRow
+          icon="clock"
+          label="Usage balance"
+          subtitle="Favor capable models with more usage available. When off, remaining usage does not rank choices. Exhausted models remain excluded."
+          value={uniform("balanceUsage")}
+          disabled={disabled}
+          onValueChange={(balanceUsage) => writeToAll({ balanceUsage })}
+        />
+        <SettingsSwitchRow
+          icon="arrow.triangle.branch"
+          label="Model diversity"
+          subtitle="Favor another provider or model when usage is comparable or unknown. When off, choose by capability, usage, and cost."
+          value={uniform("preferAlternateProvider")}
+          disabled={disabled}
+          onValueChange={(preferAlternateProvider) => writeToAll({ preferAlternateProvider })}
+        />
+      </SettingsSection>
+      <Text className="px-2 text-sm text-foreground-muted">
+        Both modes follow the same selection rules. T3 managed enforces those rules. Native
+        preferred relies on agent instructions. Changes apply to new delegated tasks and turns after
+        the agent session refreshes. The root model stays unchanged.
+        {selectedProjectKey !== null
+          ? " Select environments to change delegation settings. Projects cannot override these settings."
+          : ""}
+      </Text>
+    </View>
+  );
+}
 
 /**
  * Mobile edits auto-settle defaults across selected capable targets.

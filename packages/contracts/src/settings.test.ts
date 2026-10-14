@@ -8,6 +8,7 @@ import {
   ClientSettingsPatch,
   ClaudeSettings,
   DEFAULT_SERVER_SETTINGS,
+  ProjectSettingsOverrides,
   requiredScopesForProjectMutation,
   resolveProjectProviderInstanceEnabled,
   resolveProviderInstanceEnabled,
@@ -1182,5 +1183,97 @@ describe("server model preferences", () => {
     expect(decodeServerSettingsPatch({ migrateModelPreferences: input })).toEqual({
       migrateModelPreferences: input,
     });
+  });
+});
+
+describe("ServerSettings delegation policy", () => {
+  const policy = {
+    version: 1,
+    mode: "t3-managed",
+    balanceUsage: false,
+    preferAlternateProvider: false,
+    routes: [
+      {
+        driver: "codex",
+        model: " gpt-6.1-sol ",
+        effort: "high",
+        capabilities: ["coding", "architecture"],
+        costPerTask: 0.25,
+      },
+    ],
+  };
+
+  it("defaults existing settings to native delegation with no routes", () => {
+    expect(decodeServerSettings({}).delegationPolicy).toEqual({
+      version: 1,
+      mode: "native-preferred",
+      balanceUsage: true,
+      preferAlternateProvider: true,
+      routes: [],
+    });
+    expect(decodeServerSettingsPatch({})).not.toHaveProperty("delegationPolicy");
+    expect(ProjectSettingsOverrides.fields).not.toHaveProperty("delegationPolicy");
+  });
+
+  it.each([
+    { mode: "t3-managed" },
+    { balanceUsage: false },
+    { preferAlternateProvider: false },
+    { routes: [] },
+    { version: 1 },
+    {},
+  ])("preserves only supplied policy patch fields %j", (delegationPolicy) => {
+    expect(decodeServerSettingsPatch({ delegationPolicy })).toEqual({ delegationPolicy });
+  });
+
+  it("round-trips the complete environment policy and normalizes model names", () => {
+    const expected = {
+      ...policy,
+      routes: [{ ...policy.routes[0], model: "gpt-6.1-sol" }],
+    };
+    expect(
+      encodeServerSettings(decodeServerSettings({ delegationPolicy: policy })).delegationPolicy,
+    ).toEqual(expected);
+    expect(decodeServerSettingsPatch({ delegationPolicy: policy }).delegationPolicy).toEqual(
+      expected,
+    );
+  });
+
+  it.each([
+    { version: 2 },
+    { mode: "automatic" },
+    { balanceUsage: "true" },
+    { preferAlternateProvider: null },
+    { routes: [{ ...policy.routes[0], model: " " }] },
+    { routes: [{ ...policy.routes[0], effort: "max" }] },
+    { routes: [{ ...policy.routes[0], capabilities: ["guess"] }] },
+    ...[-1, Infinity, -Infinity, NaN].map((costPerTask) => ({
+      routes: [{ ...policy.routes[0], costPerTask }],
+    })),
+  ])("rejects invalid policy fields %j", (invalid) => {
+    const input = { delegationPolicy: { ...policy, ...invalid } };
+    expect(() => decodeServerSettings(input)).toThrow();
+    expect(() => decodeServerSettingsPatch(input)).toThrow();
+  });
+
+  it("accepts zero task cost and every supported capability and effort", () => {
+    const capabilities = [
+      "lookup",
+      "discovery",
+      "mechanical",
+      "routine",
+      "coding",
+      "substantial",
+      "architecture",
+    ];
+    for (const effort of ["low", "medium", "high", "xhigh"]) {
+      const input = {
+        ...policy,
+        routes: [{ ...policy.routes[0], effort, capabilities, costPerTask: 0 }],
+      };
+      expect(
+        decodeServerSettingsPatch({ delegationPolicy: input }).delegationPolicy?.routes?.[0],
+      ).toMatchObject({ effort, capabilities, costPerTask: 0 });
+    }
   });
 });
