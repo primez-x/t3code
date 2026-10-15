@@ -67,6 +67,7 @@ export const DelegationRoutingDecision = Schema.Struct({
   reason: Schema.Literals([
     "explicit-target",
     "advisor-fable",
+    "advisor-opus",
     "advisor-fallback",
     "headroom",
     "alternate-provider",

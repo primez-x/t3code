@@ -737,13 +737,12 @@ const make = Effect.gen(function* () {
       }
       const parent = yield* orchestrator.getThreadRecords(command.parentThreadId, ["subagents"]);
       const excludedReviewerModels = new Set<string>();
-      if (role === "review") {
-        excludedReviewerModels.add(parent.thread.modelSelection.model);
-        const records = new Map<ThreadId, ProjectionRecords<"subagents">>([
-          [parent.thread.id, parent],
-        ]);
+      let root = parent;
+      const records = new Map<ThreadId, ProjectionRecords<"subagents">>([
+        [parent.thread.id, parent],
+      ]);
+      if (role === "advice" || role === "review") {
         const ancestorIds = new Set<ThreadId>();
-        let root = parent;
         while (
           root.thread.lineage?.relationshipToParent === "subagent" &&
           root.thread.lineage.parentThreadId !== null
@@ -763,6 +762,9 @@ const make = Effect.gen(function* () {
             break;
           root = ancestor;
         }
+      }
+      if (role === "review") {
+        excludedReviewerModels.add(parent.thread.modelSelection.model);
         excludedReviewerModels.add(root.thread.modelSelection.model);
         const visited = new Set<ThreadId>();
         const pending = [root];
@@ -909,6 +911,7 @@ const make = Effect.gen(function* () {
         policy,
         providers: candidateProviders,
         parent: parent.thread.modelSelection,
+        rootModel: root.thread.modelSelection.model,
         role,
         capability,
         nowMs: selectionNowMs,

@@ -2415,6 +2415,94 @@ it.effect(
     }).pipe(Effect.scoped),
 );
 
+it.effect.each(["gpt-6.1-sol", "claude-opus-5-5"])(
+  "nested advice uses the actual %s root model",
+  (rootModel) => {
+    const commands: Array<OrchestrationV2Command> = [];
+    const rootId = ThreadId.make("advisor-root");
+    const childModel = rootModel === "gpt-6.1-sol" ? "claude-opus-5-5" : "gpt-6.1-sol";
+    const claude = {
+      ...delegationProvider,
+      instanceId: ProviderInstanceId.make("claude_advisor"),
+      driver: ProviderDriverKind.make("claudeAgent"),
+      models: ["claude-opus-5-5", "claude-fable-5-1"].map((slug) => ({
+        ...delegationProvider.models[0]!,
+        slug,
+        capabilities: {
+          optionDescriptors: [
+            {
+              id: "effort",
+              label: "Effort",
+              type: "select" as const,
+              options: [{ id: "high", label: "High" }],
+            },
+          ],
+        },
+      })),
+    };
+    const projections = new Map<ThreadId, OrchestrationV2ThreadProjection>([
+      [
+        rootId,
+        {
+          thread: {
+            id: rootId,
+            projectId: delegationProjectId,
+            modelSelection: { instanceId: delegationProvider.instanceId, model: rootModel },
+          },
+          subagents: [
+            {
+              origin: "app_owned",
+              childThreadId: delegationParentId,
+              delegationRole: "implementation",
+              model: childModel,
+            },
+          ],
+        } as unknown as OrchestrationV2ThreadProjection,
+      ],
+      [
+        delegationParentId,
+        {
+          thread: {
+            id: delegationParentId,
+            projectId: delegationProjectId,
+            modelSelection: { instanceId: delegationProvider.instanceId, model: childModel },
+            lineage: { relationshipToParent: "subagent", parentThreadId: rootId },
+          },
+          subagents: [],
+        } as unknown as OrchestrationV2ThreadProjection,
+      ],
+    ]);
+    const routes: ReadonlyArray<DelegationModelRoute> = claude.models.map((model) => ({
+      driver: claude.driver,
+      model: model.slug,
+      effort: "high",
+      capabilities: ["architecture"],
+      costPerTask: 1,
+    }));
+    return Effect.gen(function* () {
+      const threads = yield* ThreadManagementService.ThreadManagementService;
+      yield* threads.dispatch({ ...delegationCommand(), role: "advice" });
+      expect(commands[0]).toMatchObject({
+        modelSelection: {
+          model: rootModel === "gpt-6.1-sol" ? "claude-opus-5-5" : "claude-fable-5-1",
+        },
+      });
+    }).pipe(
+      Effect.provide(
+        layerDelegationTest(
+          commands,
+          [claude],
+          true,
+          "t3-managed",
+          routes,
+          [claude.instanceId],
+          projections,
+        ),
+      ),
+    );
+  },
+);
+
 it.effect(
   "advisor requests persist the architecture floor when a weaker capability was requested",
   () => {
@@ -2426,7 +2514,7 @@ it.effect(
       models: [
         {
           ...delegationProvider.models[0]!,
-          slug: "claude-fable-5-1",
+          slug: "claude-opus-5-5",
           capabilities: {
             optionDescriptors: [
               {
@@ -2443,7 +2531,7 @@ it.effect(
     const routes: ReadonlyArray<DelegationModelRoute> = [
       {
         driver: claude.driver,
-        model: "claude-fable-5-1",
+        model: "claude-opus-5-5",
         effort: "high",
         capabilities: ["architecture"],
         costPerTask: 0.6099,

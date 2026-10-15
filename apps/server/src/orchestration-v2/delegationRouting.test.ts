@@ -93,6 +93,7 @@ const select = (overrides: Partial<Parameters<typeof selectDelegationTarget>[0]>
     role: "implementation",
     nowMs,
     ...overrides,
+    rootModel: overrides.rootModel ?? overrides.parent?.model ?? parent.model,
   });
 const selected = (result: ReturnType<typeof select>) => {
   expect(result.ok).toBe(true);
@@ -101,6 +102,100 @@ const selected = (result: ReturnType<typeof select>) => {
 };
 
 describe("selectDelegationTarget", () => {
+  test.each([false, true])(
+    "uses an independent fallback after an Opus writer (Astra excluded: %s)",
+    (excludeAstra) => {
+      const advisors = provider("claude_main", "claudeAgent", [
+        "claude-opus-5-5",
+        "claude-fable-5-1",
+      ]);
+      const result = select({
+        role: "review",
+        providers: [codex, advisors],
+        excludedReviewerModels: ["claude-opus-5-5", ...(excludeAstra ? ["gpt-6-astra"] : [])],
+        policy: policy([
+          route("codex", "gpt-6-sol"),
+          route("claudeAgent", "claude-opus-5-5"),
+          route("claudeAgent", "claude-fable-5-1"),
+          route("codex", "gpt-6-astra"),
+        ]),
+      });
+      if (excludeAstra) expect(result.ok).toBe(false);
+      else {
+        expect(selected(result).modelSelection.model).toBe("gpt-6-astra");
+        expect(selected(result).decision.reason).toBe("advisor-fallback");
+        expect(selected(result).modelSelection.options).toContainEqual({
+          id: "reasoningEffort",
+          value: "high",
+        });
+      }
+    },
+  );
+  test.each([
+    ["gpt-6.1-sol", "claude-opus-5-5", "advisor-opus"],
+    ["claude-opus-5-5", "claude-fable-5-1", "advisor-fable"],
+    ["muse-wonder-full-1.0", "claude-opus-5-5", "advisor-opus"],
+  ])("selects the advisor for root %s", (rootModel, expected, reason) => {
+    const advisors = provider("claude_main", "claudeAgent", [
+      "claude-fable-5-1",
+      "claude-opus-5-5",
+    ]);
+    const result = selected(
+      select({
+        role: "advice",
+        parent: { ...parent, model: rootModel },
+        providers: [codex, advisors],
+        policy: policy([
+          route("claudeAgent", "claude-fable-5-1", 0.01),
+          route("claudeAgent", "claude-opus-5-5", 10),
+        ]),
+      }),
+    );
+    expect(result.modelSelection.model).toBe(expected);
+    expect(result.modelSelection.options).toContainEqual({ id: "effort", value: "high" });
+    expect(result.decision.reason).toBe(reason);
+  });
+  test.each([
+    ["seven_day_fable", "claude-opus-5-5"],
+    ["seven_day_opus", "gpt-6-astra"],
+  ])("uses the Sol advisor quota rather than %s", (scope, expected) => {
+    const advisors = provider(
+      "claude_main",
+      "claudeAgent",
+      ["claude-fable-5-1", "claude-opus-5-5"],
+      limits(100, scope),
+    );
+    const result = selected(
+      select({
+        role: "advice",
+        providers: [codex, advisors],
+        policy: policy([
+          route("claudeAgent", "claude-fable-5-1"),
+          route("claudeAgent", "claude-opus-5-5"),
+          route("codex", "gpt-6-astra"),
+        ]),
+      }),
+    );
+    expect(result.modelSelection.model).toBe(expected);
+  });
+  test("preserves the root advisor through a different child model", () => {
+    const advisors = provider("claude_main", "claudeAgent", [
+      "claude-fable-5-1",
+      "claude-opus-5-5",
+    ]);
+    const result = selected(
+      select({
+        role: "advice",
+        rootModel: "claude-opus-5-5",
+        providers: [codex, advisors],
+        policy: policy([
+          route("claudeAgent", "claude-fable-5-1"),
+          route("claudeAgent", "claude-opus-5-5"),
+        ]),
+      }),
+    );
+    expect(result.modelSelection.model).toBe("claude-fable-5-1");
+  });
   test("defaults pinned advice to high even when a cheaper low route exists", () => {
     const opus = provider("claude_main", "claudeAgent", ["claude-opus-5-5"]);
     const result = selected(
@@ -159,7 +254,7 @@ describe("selectDelegationTarget", () => {
     expect(result.ok).toBe(false);
     if (!result.ok)
       expect(result.error.message).toContain(
-        "Astra requires unavailable or exhausted Claude accounts",
+        "Astra requires an unavailable, exhausted, or excluded Claude advisor",
       );
   });
   test.each(["disabled", "exhausted"])(
@@ -509,8 +604,13 @@ describe("selectDelegationTarget", () => {
       windows: [{ ...limits(100).windows[0]!, modelFamily: "claude-fable-5-1" }],
     };
     expect(
-      selected(select({ role: "advice", providers: [codex, { ...claude, usageLimits }] }))
-        .modelSelection.model,
+      selected(
+        select({
+          role: "advice",
+          parent: { instanceId: claude.instanceId, model: "claude-opus-5-5" },
+          providers: [codex, { ...claude, usageLimits }],
+        }),
+      ).modelSelection.model,
     ).toBe("gpt-6-astra");
   });
   test("does not use Astra while another Claude account remains available", () => {
@@ -519,6 +619,7 @@ describe("selectDelegationTarget", () => {
       selected(
         select({
           role: "advice",
+          parent: { instanceId: claude.instanceId, model: "claude-opus-5-5" },
           providers: [codex, { ...claude, usageLimits: limits(100, "seven_day") }, spare],
         }),
       ).modelSelection.instanceId,
@@ -684,12 +785,13 @@ describe("selectDelegationTarget", () => {
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.error.category).toBe("advisor-unavailable");
   });
-  test("hidden Fable root still permits a distinct architecture reviewer", () => {
+  test("hidden Fable writer still permits a distinct architecture reviewer", () => {
     const result = selected(
       select({
         role: "review",
         capability: "architecture",
-        parent: { instanceId: claude.instanceId, model: "claude-fable-5-1" },
+        parent: { instanceId: claude.instanceId, model: "claude-opus-5-5" },
+        excludedReviewerModels: ["claude-fable-5-1"],
         hiddenModelsByInstance: { claude_main: ["claude-fable-5-1"] },
       }),
     );
@@ -717,6 +819,7 @@ describe("selectDelegationTarget", () => {
         selected(
           select({
             role,
+            parent: { instanceId: claude.instanceId, model: "claude-opus-5-5" },
             providers: [{ ...workers, models }],
             policy: policy([route("claudeAgent", `${family}-*`)]),
           }),
@@ -809,12 +912,13 @@ describe("selectDelegationTarget", () => {
     );
   });
   test.each(["advice", "review"] as const)(
-    "prefers Fable high for %s despite quota and cost",
+    "prefers Fable high for Opus-root %s despite quota and cost",
     (role) => {
       const result = selected(
         select({
           role,
           capability: "architecture",
+          parent: { instanceId: claude.instanceId, model: "claude-opus-5-5" },
           providers: [codex, { ...claude, usageLimits: limits(99, "seven_day") }],
         }),
       );
@@ -861,7 +965,8 @@ describe("selectDelegationTarget", () => {
       select({
         role: "review",
         capability: "architecture",
-        parent: { instanceId: claude.instanceId, model: "claude-fable-5-1" },
+        parent: { instanceId: claude.instanceId, model: "claude-opus-5-5" },
+        excludedReviewerModels: ["claude-fable-5-1"],
         policy: policy([
           { ...route("codex", "gpt-6-sol", 10), effort: "xhigh" },
           route("codex", "gpt-6-sol", 1),
@@ -877,6 +982,7 @@ describe("selectDelegationTarget", () => {
       const model = advisor === "Fable" ? "claude-fable-5-1" : "gpt-6-astra";
       const result = select({
         role: "advice",
+        parent: { instanceId: claude.instanceId, model: "claude-opus-5-5" },
         capability: "architecture",
         providers: advisor === "Fable" ? [codex, claude] : [codex, { ...claude, enabled: false }],
         policy: policy([{ ...route(driver, model, 0.1), effort: "low" }]),
@@ -888,6 +994,7 @@ describe("selectDelegationTarget", () => {
   test("reports effective advice floor and route limits when the policy has no architecture route", () => {
     const result = select({
       role: "advice",
+      parent: { instanceId: claude.instanceId, model: "claude-opus-5-5" },
       capability: "lookup",
       policy: policy([{ ...route("claudeAgent", "claude-fable-5-1"), capabilities: ["lookup"] }]),
     });
@@ -905,6 +1012,7 @@ describe("selectDelegationTarget", () => {
       selected(
         select({
           role: "advice",
+          parent: { instanceId: claude.instanceId, model: "claude-opus-5-5" },
           providers: [codex, { ...claude, usageLimits: limits(100, "seven_day_fable") }],
         }),
       ).modelSelection.model,
@@ -914,7 +1022,7 @@ describe("selectDelegationTarget", () => {
         .modelSelection.model,
     ).toBe("gpt-6-astra");
   });
-  test("fails when Fable is absent while a Claude account remains available", () => {
+  test("fails when the preferred advisor is absent while Claude remains available", () => {
     const result = select({
       role: "advice",
       providers: [codex, provider("claude_main", "claudeAgent", ["claude-sonnet-5"])],
@@ -934,7 +1042,8 @@ describe("selectDelegationTarget", () => {
       selected(
         select({
           role: "review",
-          parent: { instanceId: claude.instanceId, model: "claude-fable-5-1" },
+          parent: { instanceId: claude.instanceId, model: "claude-opus-5-5" },
+          excludedReviewerModels: ["claude-fable-5-1"],
         }),
       ).modelSelection.model,
     ).toBe("gpt-6-sol");
@@ -1050,14 +1159,13 @@ describe("selectDelegationTarget", () => {
     });
     expect(result.ok).toBe(false);
   });
-  test("fails review when Fable is absent and no root or writer excludes Fable", () => {
+  test("selects Opus review without requiring Fable for a Sol root", () => {
     const result = select({
       role: "review",
       providers: [codex, provider("claude_main", "claudeAgent", ["claude-opus-5-5"])],
       policy: policy([route("claudeAgent", "claude-opus-5-5"), route("codex", "gpt-6-astra")]),
     });
-    expect(result.ok).toBe(false);
-    if (!result.ok) expect(result.error.category).toBe("advisor-unavailable");
+    expect(selected(result).modelSelection.model).toBe("claude-opus-5-5");
   });
   test("returns bounded decisions without account details", () => {
     const result = selected(

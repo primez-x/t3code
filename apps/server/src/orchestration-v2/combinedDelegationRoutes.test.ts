@@ -93,6 +93,7 @@ test("the default Codex exact lookup floor uses Luna medium", () => {
     policy,
     providers: [provider],
     parent: { instanceId, model: "gpt-6.1-sol" },
+    rootModel: "gpt-6.1-sol",
     role: "research",
     capability: "lookup",
     nowMs: 0,
