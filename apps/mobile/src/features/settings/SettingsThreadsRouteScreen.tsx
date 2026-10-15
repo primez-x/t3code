@@ -117,7 +117,7 @@ function DelegationSettingsRows() {
         />
         <SettingsChoiceRow
           label="T3 managed"
-          description="T3 selects each delegated provider, model, and effort, and controls native subagent launches."
+          description="T3 selects delegated providers, models, and effort automatically. Explicit requests take precedence. T3 also controls native subagent launches."
           separated
           selected={uniform("mode") === "t3-managed"}
           disabled={disabled}

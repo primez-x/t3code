@@ -101,6 +101,130 @@ const selected = (result: ReturnType<typeof select>) => {
 };
 
 describe("selectDelegationTarget", () => {
+  test("defaults pinned advice to high even when a cheaper low route exists", () => {
+    const opus = provider("claude_main", "claudeAgent", ["claude-opus-5-5"]);
+    const result = selected(
+      select({
+        role: "advice",
+        providers: [codex, opus],
+        requestedTarget: { instanceId: opus.instanceId, model: "claude-opus-5-5" },
+        policy: policy([
+          { ...route("claudeAgent", "claude-opus-5-5", 0.01), effort: "low" },
+          route("claudeAgent", "claude-opus-5-5", 2),
+        ]),
+      }),
+    );
+    expect(result.modelSelection.options).toContainEqual({ id: "effort", value: "high" });
+  });
+  test("honors mapped xhigh on a pinned review", () => {
+    const opus = provider("claude_main", "claudeAgent", ["claude-opus-5-5"]);
+    const result = selected(
+      select({
+        role: "review",
+        providers: [codex, opus],
+        requestedTarget: {
+          instanceId: opus.instanceId,
+          model: "claude-opus-5-5",
+          options: [{ id: "effort", value: "xhigh" }],
+        },
+        policy: policy([{ ...route("claudeAgent", "claude-opus-5-5"), effort: "xhigh" }]),
+      }),
+    );
+    expect(result.modelSelection.options).toContainEqual({ id: "effort", value: "xhigh" });
+  });
+  test("limits a provider-only review to the requested driver without pinning the parent model", () => {
+    const result = selected(
+      select({
+        role: "review",
+        requestedTarget: { driver: ProviderDriverKind.make("codex") },
+        providers: [
+          { ...codex, models: [...codex.models, { ...codex.models[0]!, slug: "gpt-6.1-sol" }] },
+          claude,
+        ],
+        policy: policy([
+          route("codex", "gpt-6-sol"),
+          route("codex", "gpt-6.1-sol"),
+          route("claudeAgent", "claude-fable-5-1"),
+          route("codex", "gpt-6-astra"),
+        ]),
+      }),
+    );
+    expect(result.modelSelection.model).toBe("gpt-6.1-sol");
+  });
+  test("names the Astra fallback rule when Claude is healthy", () => {
+    const result = select({
+      role: "advice",
+      requestedTarget: { instanceId: codex.instanceId, model: "gpt-6-astra" },
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok)
+      expect(result.error.message).toContain(
+        "Astra requires unavailable or exhausted Claude accounts",
+      );
+  });
+  // Pin failure cases: missing, disabled, exhausted, hidden, excluded, or unmapped targets.
+  test.each(["advice", "review", "general"] as const)(
+    "preserves explicit Opus for %s across separate requests",
+    (role) => {
+      const opus = provider(
+        "claude_main",
+        "claudeAgent",
+        ["claude-fable-5-1", "claude-opus-5-5"],
+        limits(84),
+      );
+      const input = {
+        role,
+        capability: "architecture" as const,
+        providers: [codex, opus],
+        requestedTarget: { instanceId: opus.instanceId, model: "claude-opus-5-5" },
+        policy: policy([
+          route("claudeAgent", "claude-fable-5-1", 0.1),
+          route("claudeAgent", "claude-opus-5-5", 2),
+          route("codex", "gpt-6-astra", 0.01),
+        ]),
+      };
+      for (let round = 0; round < 2; round++) {
+        const result = selected(select(input));
+        expect(result.modelSelection.model).toBe("claude-opus-5-5");
+        expect(result.modelSelection.options).toContainEqual({ id: "effort", value: "high" });
+        expect(result.decision.reason).toBe("explicit-target");
+      }
+    },
+  );
+  test.each(["missing", "disabled", "exhausted", "hidden", "excluded", "unmapped"])(
+    "refuses an explicit Opus review without substitution when %s",
+    (state) => {
+      const opus = provider(
+        "claude_main",
+        "claudeAgent",
+        ["claude-fable-5-1", "claude-opus-5-5"],
+        limits(state === "exhausted" ? 100 : 50),
+      );
+      const result = select({
+        role: "review",
+        providers: [codex, { ...opus, enabled: state !== "disabled" }],
+        requestedTarget: {
+          instanceId: opus.instanceId,
+          model: state === "missing" ? "missing-opus" : "claude-opus-5-5",
+        },
+        excludedReviewerModels: state === "excluded" ? ["claude-opus-5-5"] : [],
+        hiddenModelsByInstance: state === "hidden" ? { claude_main: ["claude-opus-5-5"] } : {},
+        policy: policy([
+          route("claudeAgent", "claude-fable-5-1"),
+          route("codex", "gpt-6-astra"),
+          ...(state === "unmapped" ? [] : [route("claudeAgent", "claude-opus-5-5")]),
+        ]),
+      });
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.error.message).toContain(
+          state === "missing" ? "missing-opus" : "claude-opus-5-5",
+        );
+        expect(result.error.message).toContain("No substitute");
+      }
+    },
+  );
+
   test("prefers alternate providers within five quota percentage points", () => {
     expect(selected(select()).modelSelection.instanceId).toBe("claude_main");
   });

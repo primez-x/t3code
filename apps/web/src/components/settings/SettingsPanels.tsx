@@ -2535,7 +2535,7 @@ export function GeneralSettingsPanel() {
               : `${
                   settings.delegationPolicy.mode === "native-preferred"
                     ? "Use provider-native subagents when supported. T3 handles other assignments."
-                    : "T3 selects each delegated provider, model, and effort, and controls native subagent launches."
+                    : "T3 selects delegated providers, models, and effort automatically. Explicit requests take precedence. T3 also controls native subagent launches."
                 } Changes apply to new delegated tasks and turns after the agent session refreshes. The root model stays unchanged.`
           }
           control={

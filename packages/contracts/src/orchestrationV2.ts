@@ -3121,6 +3121,13 @@ export const OrchestrationV2Command = Schema.Union([
     capability: Schema.optional(DelegationCapability),
     role: Schema.optional(DelegationTaskRole),
     delegationTargetExplicit: Schema.optional(Schema.Boolean),
+    delegationRuntimeModeExplicit: Schema.optional(Schema.Boolean),
+    delegationProviderConstraint: Schema.optional(
+      Schema.Struct({
+        instanceId: Schema.optional(ProviderInstanceId),
+        driver: Schema.optional(ProviderDriverKind),
+      }),
+    ),
     routingDecision: Schema.optional(DelegationRoutingDecision),
     ...OrchestrationV2CreationFields,
     commandId: CommandId,

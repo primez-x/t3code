@@ -80,6 +80,8 @@ import {
 } from "@t3tools/provider-core/server/subagentProjection";
 import {
   DispatchModeLimit,
+  runtimeModeRank,
+  resolveSupportedRuntimeMode,
   type DispatchModeRefusal,
 } from "../orchestration-v2/DispatchModeLimit.ts";
 import { runOutcome } from "../orchestration-v2/RestartBackgroundNote.ts";
@@ -533,19 +535,6 @@ function canExposeTaskRunResult(run: OrchestrationV2Run | undefined): run is Orc
   );
 }
 
-function runtimeModeRank(mode: RuntimeMode): number {
-  switch (mode) {
-    case "approval-required":
-      return 0;
-    case "auto-accept-edits":
-      return 1;
-    case "auto":
-      return 2;
-    case "full-access":
-      return 3;
-  }
-}
-
 function interactionModeRank(mode: ProviderInteractionMode): number {
   return mode === "plan" ? 0 : 1;
 }
@@ -564,7 +553,7 @@ export function resolveRuntimeMode(
 ): Effect.Effect<RuntimeMode, OrchestratorMcpFailure> {
   const inherited = requested === undefined || requested === "inherit";
   const resolved = inherited ? parentMode : requested;
-  if (runtimeModeRank(resolved) > runtimeModeRank(parentMode)) {
+  if (runtimeModeRank[resolved] > runtimeModeRank[parentMode]) {
     return Effect.fail(
       failure(
         "runtime_mode_escalation_denied",
@@ -585,10 +574,7 @@ export function resolveRuntimeMode(
     );
   }
   return Effect.succeed(
-    supported
-      .filter((mode) => runtimeModeRank(mode) <= runtimeModeRank(resolved))
-      .toSorted((left, right) => runtimeModeRank(right) - runtimeModeRank(left))[0] ??
-      "approval-required",
+    resolveSupportedRuntimeMode(resolved, supported, true) ?? "approval-required",
   );
 }
 
@@ -1561,7 +1547,7 @@ const make = Effect.gen(function* () {
     },
     modes: { readonly runtimeMode: RuntimeMode; readonly interactionMode: ProviderInteractionMode },
   ) =>
-    runtimeModeRank(modes.runtimeMode) <= runtimeModeRank(limits.runtimeMode) &&
+    runtimeModeRank[modes.runtimeMode] <= runtimeModeRank[limits.runtimeMode] &&
     interactionModeRank(modes.interactionMode) <= interactionModeRank(limits.interactionMode);
 
   /**
@@ -1924,7 +1910,7 @@ const make = Effect.gen(function* () {
           delegationConstraints: [
             "Delegated effort is capped at xhigh. Fast mode and priority service are forbidden.",
             delegationPolicy.mode === "t3-managed"
-              ? "T3 chooses every delegated target. Native delegation controls apply to Codex, Claude, and Muse only."
+              ? "Omit target for automatic selection. Supply target for an explicit user request in either mode. An unavailable requested target fails without substitution. Native delegation controls apply to Codex, Claude, and Muse only."
               : "T3 applies the policy to automatic targets and validates explicit targets. Native provider delegation remains available.",
           ],
           parentThreadId: parent?.thread.id ?? null,
@@ -2019,16 +2005,9 @@ const make = Effect.gen(function* () {
             "Delegated tasks require an active run owned by this MCP provider session.",
           );
         }
-        const settings = isRetryOfAcceptedDelegation
-          ? undefined
-          : yield* serverSettings.getSettings.pipe(
-              Effect.mapError(() =>
-                failure("orchestration_error", "Unable to read server settings."),
-              ),
-            );
+        // The domain service selects omitted targets and validates every resolved target.
         const automaticTarget =
-          input.target === undefined || settings?.delegationPolicy.mode === "t3-managed";
-        // Automatic targets are only hints. The domain service selects and validates the actual target.
+          input.target?.model === undefined || input.target.providerInstanceId === undefined;
         const target: ResolvedTarget =
           isRetryOfAcceptedDelegation || automaticTarget
             ? {
@@ -2047,7 +2026,13 @@ const make = Effect.gen(function* () {
               });
         const runtimeMode = isRetryOfAcceptedDelegation
           ? parent.thread.runtimeMode
-          : yield* resolveRuntimeMode(parent.thread.runtimeMode, input.runtimeMode, target);
+          : yield* resolveRuntimeMode(
+              parent.thread.runtimeMode,
+              input.runtimeMode,
+              input.target?.model === undefined
+                ? { ...target, supportedRuntimeModes: undefined }
+                : target,
+            );
         const interactionMode = isRetryOfAcceptedDelegation
           ? parent.thread.interactionMode
           : yield* resolveInteractionMode(parent.thread.interactionMode, input.interactionMode);
@@ -2080,8 +2065,27 @@ const make = Effect.gen(function* () {
             parentNodeId: parentRun.rootNodeId,
             task: taskPrompt(input),
             ...(input.title === undefined ? {} : { title: input.title }),
-            modelSelection: target.modelSelection,
-            delegationTargetExplicit: input.target !== undefined,
+            modelSelection:
+              input.target?.model === undefined
+                ? { ...target.modelSelection, options: input.target?.options ?? [] }
+                : target.modelSelection,
+            delegationTargetExplicit: input.target?.model !== undefined,
+            delegationRuntimeModeExplicit:
+              input.runtimeMode !== undefined && input.runtimeMode !== "inherit",
+            ...(input.target?.model !== undefined ||
+            input.target?.providerInstanceId !== undefined ||
+            input.target?.driverKind !== undefined
+              ? {
+                  delegationProviderConstraint: {
+                    ...(input.target.providerInstanceId === undefined
+                      ? {}
+                      : { instanceId: input.target.providerInstanceId }),
+                    ...(input.target.driverKind === undefined
+                      ? {}
+                      : { driver: input.target.driverKind }),
+                  },
+                }
+              : {}),
             ...(input.role === undefined ? {} : { role: input.role }),
             ...(input.capability === undefined ? {} : { capability: input.capability }),
             runtimeMode,

@@ -4,10 +4,12 @@ import * as Schema from "effect/Schema";
 import {
   DelegationCapability,
   DelegationTaskRole,
+  RuntimeMode,
   type DelegationModelRoute,
   type DelegationPolicy,
   type ModelSelection,
   type ProviderInstanceId,
+  type ProviderDriverKind,
   type ProviderOptionSelection,
   type ServerProvider,
   type ServerProviderModel,
@@ -20,12 +22,20 @@ export class DelegationSelectionError extends Schema.TaggedError<DelegationSelec
     category: Schema.Literals(["no-candidate", "advisor-unavailable"]),
     capability: DelegationCapability,
     role: DelegationTaskRole,
+    requestedModel: Schema.optionalKey(Schema.String),
+    runtimeMode: Schema.optionalKey(RuntimeMode),
+    constraint: Schema.optionalKey(Schema.Literal("astra-fallback-only")),
   },
 ) {
   override get message(): string {
+    if (this.constraint === "astra-fallback-only")
+      return "Astra requires unavailable or exhausted Claude accounts. No substitute was selected.";
+    const runtime = this.runtimeMode ? ` Runtime mode: "${this.runtimeMode}".` : "";
+    if (this.requestedModel !== undefined)
+      return `Requested model "${this.requestedModel}" cannot run role "${this.role}" at capability "${this.capability}". Check availability, quota, reviewer exclusions, routes, and effort. No substitute was selected.${runtime}`;
     return this.category === "advisor-unavailable"
       ? "Fable high is unavailable. Astra requires unavailable or exhausted Claude accounts."
-      : `No available provider model satisfies capability "${this.capability}" for role "${this.role}" within configured route and option limits.`;
+      : `No available provider model satisfies capability "${this.capability}" for role "${this.role}" within configured route and option limits.${runtime}`;
   }
 }
 
@@ -36,10 +46,16 @@ export interface DelegationSelectionInput {
   readonly capability: DelegationCapability;
   readonly role: DelegationTaskRole;
   readonly nowMs: number;
+  readonly runtimeMode?: RuntimeMode;
   readonly excludedReviewerModels?: ReadonlyArray<string>;
   readonly activeAssignments?: ReadonlyArray<ModelSelection>;
   readonly allowedProviderInstanceIds?: ReadonlyArray<ProviderInstanceId>;
-  readonly requestedTarget?: ModelSelection;
+  readonly requestedTarget?: {
+    readonly instanceId?: ProviderInstanceId | undefined;
+    readonly driver?: ProviderDriverKind | undefined;
+    readonly model?: string;
+    readonly options?: ReadonlyArray<ProviderOptionSelection>;
+  };
   readonly hiddenModelsByInstance?: Readonly<Record<string, ReadonlyArray<string>>>;
 }
 
@@ -48,6 +64,7 @@ export interface DelegationSelectionDecision {
   readonly capability: DelegationCapability;
   readonly role: DelegationTaskRole;
   readonly reason:
+    | "explicit-target"
     | "advisor-fable"
     | "advisor-fallback"
     | "headroom"
@@ -176,12 +193,20 @@ function optionsFor(
 export function selectDelegationTarget(input: DelegationSelectionInput): DelegationSelectionResult {
   const advisor = input.role === "advice" || input.role === "review";
   const capability = advisor ? "architecture" : input.capability;
-  const fail = (category: DelegationSelectionError["category"]): DelegationSelectionResult => ({
+  const fail = (
+    category: DelegationSelectionError["category"],
+    constraint?: "astra-fallback-only",
+  ): DelegationSelectionResult => ({
     ok: false,
     error: new DelegationSelectionError({
       category,
       capability,
       role: input.role,
+      ...(input.runtimeMode === undefined ? {} : { runtimeMode: input.runtimeMode }),
+      ...(input.requestedTarget?.model !== undefined
+        ? { requestedModel: input.requestedTarget.model }
+        : {}),
+      ...(constraint === undefined ? {} : { constraint }),
     }),
   });
   const usableProviders = input.providers.filter((provider) => canServe(provider, input));
@@ -219,15 +244,24 @@ export function selectDelegationTarget(input: DelegationSelectionInput): Delegat
             quotaFor(provider, model.slug, input.nowMs).headroomPercent !== 0,
         ),
     );
-  const fixedAdvisor = advisor && !alternateReview;
+  const automaticAdvisor = advisor && input.requestedTarget === undefined;
+  const fixedAdvisor =
+    advisor &&
+    (input.requestedTarget
+      ? !input.requestedTarget.options?.some((option) => effortIds.has(option.id))
+      : !alternateReview);
   const candidates: Array<Candidate> = [];
+  let requestedAstraBlocked = false;
   input.policy.routes.forEach((route, routeIndex) => {
     if (!route.capabilities.includes(capability) || (fixedAdvisor && route.effort !== "high"))
       return;
     for (const provider of usableProviders) {
       if (
         provider.driver !== route.driver ||
-        (input.requestedTarget && provider.instanceId !== input.requestedTarget.instanceId)
+        (input.requestedTarget?.instanceId !== undefined &&
+          provider.instanceId !== input.requestedTarget.instanceId) ||
+        (input.requestedTarget?.driver !== undefined &&
+          provider.driver !== input.requestedTarget.driver)
       )
         continue;
       for (const model of provider.models) {
@@ -236,7 +270,7 @@ export function selectDelegationTarget(input: DelegationSelectionInput): Delegat
           excluded(model) ||
           (!model.isCustom &&
             input.hiddenModelsByInstance?.[provider.instanceId]?.includes(model.slug)) ||
-          (input.requestedTarget &&
+          (input.requestedTarget?.model !== undefined &&
             model.slug !== input.requestedTarget.model &&
             !model.aliases?.includes(input.requestedTarget.model))
         )
@@ -244,14 +278,18 @@ export function selectDelegationTarget(input: DelegationSelectionInput): Delegat
         const astra = [model.slug, ...(model.aliases ?? [])].some((id) =>
           /(?:^|\/)gpt-\d+(?:\.\d+)?-astra(?:-|$)/.test(id),
         );
+        if (advisor && astra && claudeAvailable) {
+          if (input.requestedTarget?.model !== undefined) requestedAstraBlocked = true;
+          continue;
+        }
         if (
-          alternateReview
+          automaticAdvisor &&
+          (alternateReview
             ? astra
-            : advisor &&
-              (model.isCustom ||
-                (claudeAvailable
-                  ? provider.driver !== "claudeAgent" || !isFamily(model.slug, "claude-fable")
-                  : provider.driver !== "codex" || !astra))
+            : model.isCustom ||
+              (claudeAvailable
+                ? provider.driver !== "claudeAgent" || !isFamily(model.slug, "claude-fable")
+                : provider.driver !== "codex" || !astra))
         )
           continue;
         const options = optionsFor(model, route.effort);
@@ -274,6 +312,7 @@ export function selectDelegationTarget(input: DelegationSelectionInput): Delegat
     }
   });
   if (candidates.length === 0) {
+    if (requestedAstraBlocked) return fail("no-candidate", "astra-fallback-only");
     const catalogFable = usableProviders.flatMap((provider) =>
       provider.driver === "claudeAgent"
         ? provider.models.filter((model) => !model.isCustom && isFamily(model.slug, "claude-fable"))
@@ -289,7 +328,7 @@ export function selectDelegationTarget(input: DelegationSelectionInput): Delegat
       ),
     );
     return fail(
-      advisor &&
+      automaticAdvisor &&
         claudeAvailable &&
         !alternateReview &&
         (catalogFable.length === 0 || configuredFable)
@@ -335,8 +374,9 @@ export function selectDelegationTarget(input: DelegationSelectionInput): Delegat
       left.model.slug.localeCompare(right.model.slug),
   );
   const chosen = balanced[0]!;
-  const reason: DelegationSelectionDecision["reason"] =
-    advisor && !alternateReview
+  const reason: DelegationSelectionDecision["reason"] = input.requestedTarget
+    ? "explicit-target"
+    : advisor && !alternateReview
       ? claudeAvailable
         ? "advisor-fable"
         : "advisor-fallback"

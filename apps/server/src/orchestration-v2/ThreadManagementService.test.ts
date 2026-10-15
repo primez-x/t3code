@@ -1372,22 +1372,209 @@ const layerDelegationTest = (
   );
 };
 
-it.effect(
-  "managed delegation replaces a disabled explicit hint before the enablement guard",
-  () => {
+it.effect("managed automatic delegation replaces a disabled inherited target", () => {
+  const commands: Array<OrchestrationV2Command> = [];
+  return Effect.gen(function* () {
+    const threads = yield* ThreadManagementService.ThreadManagementService;
+    yield* threads.dispatch(delegationCommand());
+    expect(commands[0]).toMatchObject({
+      modelSelection: {
+        instanceId: "codex_child",
+        model: "gpt-6.1-sol",
+        options: [{ id: "reasoningEffort", value: "high" }],
+      },
+      routingDecision: { capability: "coding", role: "implementation", policyVersion: 1 },
+    });
+  }).pipe(Effect.provide(layerDelegationTest(commands)));
+});
+
+it.effect("managed delegation refuses a disabled explicit target without substitution", () => {
+  const commands: Array<OrchestrationV2Command> = [];
+  return Effect.gen(function* () {
+    const threads = yield* ThreadManagementService.ThreadManagementService;
+    const error = yield* threads
+      .dispatch({ ...delegationCommand(), delegationTargetExplicit: true })
+      .pipe(Effect.flip);
+    expect(error).toMatchObject({
+      _tag: "OrchestratorCommandRejectedError",
+      cause: { _tag: "DelegationSelectionError" },
+    });
+    expect(commands).toEqual([]);
+  }).pipe(Effect.provide(layerDelegationTest(commands)));
+});
+
+it.effect.each(["advice", "review", "general"] as const)(
+  "managed explicit Opus %s survives repeated requests",
+  (role) => {
     const commands: Array<OrchestrationV2Command> = [];
+    const claude = {
+      ...delegationProvider,
+      instanceId: ProviderInstanceId.make("claude_review"),
+      driver: ProviderDriverKind.make("claudeAgent"),
+      models: ["claude-opus-5-5", "claude-fable-5-1"].map((slug) => ({
+        ...delegationProvider.models[0]!,
+        slug,
+        capabilities: {
+          optionDescriptors: [
+            {
+              id: "effort",
+              label: "Effort",
+              type: "select" as const,
+              options: [{ id: "high", label: "High" }],
+            },
+          ],
+        },
+      })),
+    };
+    const routes = ["claude-opus-5-5", "claude-fable-5-1"].map((model) => ({
+      driver: claude.driver,
+      model,
+      effort: "high" as const,
+      capabilities: ["architecture" as const],
+      costPerTask: model.includes("fable") ? 0.1 : 2,
+    }));
     return Effect.gen(function* () {
       const threads = yield* ThreadManagementService.ThreadManagementService;
-      yield* threads.dispatch({ ...delegationCommand(), delegationTargetExplicit: true });
-      expect(commands[0]).toMatchObject({
-        modelSelection: {
-          instanceId: "codex_child",
-          model: "gpt-6.1-sol",
-          options: [{ id: "reasoningEffort", value: "high" }],
-        },
-        routingDecision: { capability: "coding", role: "implementation", policyVersion: 1 },
+      for (let round = 0; round < 2; round++) {
+        yield* threads.dispatch({
+          ...delegationCommand(),
+          commandId: CommandId.make(`command:opus-review-${round}`),
+          role,
+          capability: "architecture",
+          delegationTargetExplicit: true,
+          modelSelection: {
+            instanceId: claude.instanceId,
+            model: "claude-opus-5-5",
+            options: [{ id: "effort", value: "high" }],
+          },
+        });
+      }
+      expect(commands).toHaveLength(2);
+      for (const command of commands)
+        expect(command).toMatchObject({
+          modelSelection: { model: "claude-opus-5-5" },
+          routingDecision: { reason: "explicit-target" },
+        });
+    }).pipe(
+      Effect.provide(
+        layerDelegationTest(commands, [delegationProvider, claude], true, "t3-managed", routes),
+      ),
+    );
+  },
+);
+
+it.effect.each(["driver", "instance"] as const)(
+  "provider-only %s requests choose a capable model instead of the catalog default",
+  (kind) => {
+    const commands: Array<OrchestrationV2Command> = [];
+    const provider = {
+      ...delegationProvider,
+      models: [
+        { ...delegationProvider.models[0]!, slug: "unmapped-cheap-default" },
+        ...delegationProvider.models,
+      ],
+    };
+    return Effect.gen(function* () {
+      const threads = yield* ThreadManagementService.ThreadManagementService;
+      yield* threads.dispatch({
+        ...delegationCommand(),
+        modelSelection: { instanceId: provider.instanceId, model: "unmapped-cheap-default" },
+        delegationTargetExplicit: false,
+        delegationProviderConstraint:
+          kind === "driver" ? { driver: provider.driver } : { instanceId: provider.instanceId },
       });
-    }).pipe(Effect.provide(layerDelegationTest(commands)));
+      expect(commands[0]).toMatchObject({
+        modelSelection: { model: "gpt-6.1-sol" },
+        routingDecision: { reason: "explicit-target" },
+      });
+    }).pipe(Effect.provide(layerDelegationTest(commands, [provider])));
+  },
+);
+
+it.effect("provider-only requests validate options against the selected model", () => {
+  const commands: Array<OrchestrationV2Command> = [];
+  return Effect.gen(function* () {
+    const threads = yield* ThreadManagementService.ThreadManagementService;
+    const error = yield* threads
+      .dispatch({
+        ...delegationCommand([{ id: "unknownOption", value: "invalid" }]),
+        delegationProviderConstraint: { driver: delegationProvider.driver },
+      })
+      .pipe(Effect.flip);
+    expect(error).toMatchObject({
+      cause: { _tag: "ThreadManagementDelegationOptionsError", category: "invalid-options" },
+    });
+    expect(commands).toEqual([]);
+  }).pipe(Effect.provide(layerDelegationTest(commands)));
+});
+
+it.effect.each([false, true])("provider-only runtime request preserves explicit=%s", (explicit) => {
+  const commands: Array<OrchestrationV2Command> = [];
+  const provider = {
+    ...delegationProvider,
+    supportedRuntimeModes: ["approval-required", "full-access"] as const,
+  };
+  return Effect.gen(function* () {
+    const threads = yield* ThreadManagementService.ThreadManagementService;
+    const request = threads.dispatch({
+      ...delegationCommand(),
+      runtimeMode: "auto",
+      delegationRuntimeModeExplicit: explicit,
+      delegationProviderConstraint: { instanceId: provider.instanceId },
+    });
+    if (explicit) {
+      const error = yield* request.pipe(Effect.flip);
+      expect(error).toMatchObject({ cause: { _tag: "DelegationSelectionError" } });
+      expect(error).toMatchObject({ cause: { message: expect.stringContaining("auto") } });
+      expect(commands).toEqual([]);
+    } else {
+      yield* request;
+      expect(commands[0]).toMatchObject({
+        runtimeMode: "approval-required",
+        modelSelection: { model: "gpt-6.1-sol" },
+      });
+    }
+  }).pipe(Effect.provide(layerDelegationTest(commands, [provider])));
+});
+
+it.effect.each(
+  [false, true].flatMap((modelPin) =>
+    ["exhausted", "disabled"].map((state) => ({ modelPin, state })),
+  ),
+)(
+  "provider driver pools accounts with model pin=$modelPin and first account $state",
+  ({ modelPin, state }) => {
+    const commands: Array<OrchestrationV2Command> = [];
+    const usage = (usedPercent: number) => ({
+      checkedAt: "1970-01-01T00:00:00Z",
+      windows: [
+        {
+          id: "weekly",
+          label: "Weekly",
+          kind: "weekly" as const,
+          usedPercent,
+          resetsAt: "1970-01-01T01:00:00Z",
+        },
+      ],
+    });
+    const first = { ...delegationProvider, usageLimits: usage(state === "exhausted" ? 100 : 20) };
+    const peer = {
+      ...delegationProvider,
+      instanceId: ProviderInstanceId.make("codex_peer"),
+      usageLimits: usage(20),
+    };
+    return Effect.gen(function* () {
+      const threads = yield* ThreadManagementService.ThreadManagementService;
+      yield* threads.dispatch({
+        ...delegationCommand(),
+        delegationTargetExplicit: modelPin,
+        delegationProviderConstraint: { driver: first.driver },
+        modelSelection: { instanceId: first.instanceId, model: "gpt-6.1-sol" },
+      });
+      expect(commands[0]).toMatchObject({
+        modelSelection: { instanceId: peer.instanceId, model: "gpt-6.1-sol" },
+      });
+    }).pipe(Effect.provide(layerDelegationTest(commands, [first, peer], state !== "disabled")));
   },
 );
 

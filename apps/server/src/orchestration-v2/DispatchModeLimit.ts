@@ -32,7 +32,7 @@ export const DispatchModeLimit = Context.Reference<DispatchModeLimitValue | unde
   { defaultValue: () => undefined },
 );
 
-const runtimeModeRank: Record<RuntimeMode, number> = {
+export const runtimeModeRank: Record<RuntimeMode, number> = {
   "approval-required": 0,
   "auto-accept-edits": 1,
   auto: 2,
@@ -50,3 +50,16 @@ export const exceededDispatchModeLimit = (
     : interactionModeRank[modes.interactionMode] > interactionModeRank[limit.interactionMode]
       ? "interaction"
       : undefined;
+
+/** Resolve a provider mode within the caller ceiling. Explicit modes never step down. */
+export function resolveSupportedRuntimeMode(
+  mode: RuntimeMode,
+  supported: ReadonlyArray<RuntimeMode> | undefined,
+  allowStepDown: boolean,
+): RuntimeMode | undefined {
+  if (!supported?.length || supported.includes(mode)) return mode;
+  if (!allowStepDown) return undefined;
+  return supported
+    .filter((candidate) => runtimeModeRank[candidate] <= runtimeModeRank[mode])
+    .toSorted((left, right) => runtimeModeRank[right] - runtimeModeRank[left])[0];
+}

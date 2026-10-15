@@ -117,7 +117,7 @@ export const OrchestratorMcpTarget = Schema.Struct({
   model: Schema.optional(
     TrimmedNonEmptyString.annotate({
       description:
-        "Advertised model id. Delegation also requires a configured route with a supported task floor. The built-in routes cover mapped Codex, Claude, and Muse models. Custom models require configured routes; missing costs or capabilities are never inferred.",
+        "Advertised model id. For delegate_task, omit target for automatic selection. Supply target only for an explicit user request. Requested targets cannot fall back to another model. Delegation also requires a configured route with a supported task floor. The built-in routes cover mapped Codex, Claude, and Muse models. Custom models require configured routes; missing costs or capabilities are never inferred.",
     }),
   ),
   /**
