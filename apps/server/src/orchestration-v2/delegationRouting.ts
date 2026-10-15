@@ -1,3 +1,4 @@
+import { invalidOptionSelections } from "@t3tools/shared/model";
 import * as DateTime from "effect/DateTime";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
@@ -6,6 +7,7 @@ import {
   DelegationTaskRole,
   RuntimeMode,
   type DelegationModelRoute,
+  type DelegationRoutingDecision,
   type DelegationPolicy,
   type ModelSelection,
   type ProviderInstanceId,
@@ -23,6 +25,9 @@ export class DelegationSelectionError extends Schema.TaggedError<DelegationSelec
     capability: DelegationCapability,
     role: DelegationTaskRole,
     requestedModel: Schema.optionalKey(Schema.String),
+    unavailableReason: Schema.optionalKey(
+      Schema.Literals(["provider-unavailable", "usage-exhausted"]),
+    ),
     runtimeMode: Schema.optionalKey(RuntimeMode),
     constraint: Schema.optionalKey(Schema.Literal("astra-fallback-only")),
   },
@@ -59,21 +64,7 @@ export interface DelegationSelectionInput {
   readonly hiddenModelsByInstance?: Readonly<Record<string, ReadonlyArray<string>>>;
 }
 
-export interface DelegationSelectionDecision {
-  readonly policyVersion: 1;
-  readonly capability: DelegationCapability;
-  readonly role: DelegationTaskRole;
-  readonly reason:
-    | "explicit-target"
-    | "advisor-fable"
-    | "advisor-fallback"
-    | "headroom"
-    | "alternate-provider"
-    | "alternate-model"
-    | "lowest-cost";
-  readonly headroomPercent: number | null;
-  readonly usageCheckedAt: string | null;
-}
+export type DelegationSelectionDecision = DelegationRoutingDecision;
 
 export type DelegationSelectionResult =
   | {
@@ -189,13 +180,41 @@ function optionsFor(
   return options;
 }
 
-/** Select from catalog models without provider calls or account data in the decision. */
+/** Select the requested target first, then explain any availability substitution. */
 export function selectDelegationTarget(input: DelegationSelectionInput): DelegationSelectionResult {
+  const primary = selectDelegationTargetOnce(input);
+  if (primary.ok || !input.requestedTarget || !primary.error.unavailableReason) return primary;
+  const { requestedTarget, ...automaticInput } = input;
+  const substitute = selectDelegationTargetOnce(automaticInput);
+  if (!substitute.ok) return primary;
+  return {
+    ...substitute,
+    decision: {
+      ...substitute.decision,
+      substitution: {
+        ...(requestedTarget.model === undefined ? {} : { requestedModel: requestedTarget.model }),
+        ...(requestedTarget.instanceId === undefined
+          ? {}
+          : { requestedProviderInstanceId: requestedTarget.instanceId }),
+        ...(requestedTarget.driver === undefined
+          ? {}
+          : { requestedDriver: requestedTarget.driver }),
+        reason:
+          primary.error.unavailableReason === "usage-exhausted"
+            ? "Requested target has no remaining usage."
+            : "Requested provider is unavailable for this task.",
+      },
+    },
+  };
+}
+
+function selectDelegationTargetOnce(input: DelegationSelectionInput): DelegationSelectionResult {
   const advisor = input.role === "advice" || input.role === "review";
   const capability = advisor ? "architecture" : input.capability;
   const fail = (
     category: DelegationSelectionError["category"],
     constraint?: "astra-fallback-only",
+    unavailableReason?: DelegationSelectionError["unavailableReason"],
   ): DelegationSelectionResult => ({
     ok: false,
     error: new DelegationSelectionError({
@@ -207,8 +226,17 @@ export function selectDelegationTarget(input: DelegationSelectionInput): Delegat
         ? { requestedModel: input.requestedTarget.model }
         : {}),
       ...(constraint === undefined ? {} : { constraint }),
+      ...(unavailableReason === undefined ? {} : { unavailableReason }),
     }),
   });
+  if (
+    input.requestedTarget?.options?.some(
+      (option) =>
+        effortIds.has(option.id) &&
+        (typeof option.value !== "string" || !allowedEfforts.has(option.value)),
+    )
+  )
+    return fail("no-candidate");
   const usableProviders = input.providers.filter((provider) => canServe(provider, input));
   const claudeAvailable = usableProviders.some((provider) => {
     if (provider.driver !== "claudeAgent") return false;
@@ -251,11 +279,18 @@ export function selectDelegationTarget(input: DelegationSelectionInput): Delegat
       ? !input.requestedTarget.options?.some((option) => effortIds.has(option.id))
       : !alternateReview);
   const candidates: Array<Candidate> = [];
+  const eligibleRequested: Array<{ provider: ServerProvider; model: ServerProviderModel }> = [];
   let requestedAstraBlocked = false;
   input.policy.routes.forEach((route, routeIndex) => {
-    if (!route.capabilities.includes(capability) || (fixedAdvisor && route.effort !== "high"))
+    if (
+      !route.capabilities.includes(capability) ||
+      (fixedAdvisor && route.effort !== "high") ||
+      input.requestedTarget?.options?.some(
+        (option) => effortIds.has(option.id) && option.value !== route.effort,
+      )
+    )
       return;
-    for (const provider of usableProviders) {
+    for (const provider of input.providers) {
       if (
         provider.driver !== route.driver ||
         (input.requestedTarget?.instanceId !== undefined &&
@@ -293,7 +328,17 @@ export function selectDelegationTarget(input: DelegationSelectionInput): Delegat
         )
           continue;
         const options = optionsFor(model, route.effort);
-        if (!options) continue;
+        if (
+          !options ||
+          (input.requestedTarget?.options &&
+            invalidOptionSelections(
+              input.requestedTarget.options,
+              model.capabilities?.optionDescriptors,
+            ).length > 0)
+        )
+          continue;
+        if (input.requestedTarget) eligibleRequested.push({ provider, model });
+        if (!canServe(provider, input)) continue;
         const quota = quotaFor(provider, model.slug, input.nowMs);
         if (quota.headroomPercent === 0) continue;
         candidates.push({
@@ -313,6 +358,17 @@ export function selectDelegationTarget(input: DelegationSelectionInput): Delegat
   });
   if (candidates.length === 0) {
     if (requestedAstraBlocked) return fail("no-candidate", "astra-fallback-only");
+    const servingRequested = eligibleRequested.filter(({ provider }) => canServe(provider, input));
+    const unavailableReason =
+      eligibleRequested.length > 0 && servingRequested.length === 0
+        ? ("provider-unavailable" as const)
+        : servingRequested.length > 0 &&
+            servingRequested.every(
+              ({ provider, model }) =>
+                quotaFor(provider, model.slug, input.nowMs).headroomPercent === 0,
+            )
+          ? ("usage-exhausted" as const)
+          : undefined;
     const catalogFable = usableProviders.flatMap((provider) =>
       provider.driver === "claudeAgent"
         ? provider.models.filter((model) => !model.isCustom && isFamily(model.slug, "claude-fable"))
@@ -334,6 +390,8 @@ export function selectDelegationTarget(input: DelegationSelectionInput): Delegat
         (catalogFable.length === 0 || configuredFable)
         ? "advisor-unavailable"
         : "no-candidate",
+      undefined,
+      unavailableReason,
     );
   }
 

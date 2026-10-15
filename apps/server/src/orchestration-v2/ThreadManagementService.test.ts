@@ -1403,6 +1403,144 @@ it.effect("managed delegation refuses a disabled explicit target without substit
   }).pipe(Effect.provide(layerDelegationTest(commands)));
 });
 
+it.effect("exhausted explicit Claude requests substitute through the full capability map", () => {
+  const commands: Array<OrchestrationV2Command> = [];
+  const unavailable = {
+    ...delegationProvider,
+    instanceId: ProviderInstanceId.make("claude_limited"),
+    driver: ProviderDriverKind.make("claudeAgent"),
+    models: [
+      {
+        ...delegationProvider.models[0]!,
+        slug: "claude-opus-5-5",
+        capabilities: {
+          optionDescriptors: [
+            {
+              id: "effort",
+              label: "Effort",
+              type: "select" as const,
+              options: [{ id: "high", label: "High" }],
+            },
+          ],
+        },
+      },
+    ],
+    usageLimits: {
+      checkedAt: "1970-01-01T00:00:00Z",
+      windows: [
+        {
+          id: "weekly",
+          label: "Weekly",
+          kind: "weekly" as const,
+          usedPercent: 100,
+          resetsAt: "1970-01-01T01:00:00Z",
+        },
+      ],
+    },
+  };
+  const alternate = {
+    ...delegationProvider,
+    models: [
+      {
+        ...delegationProvider.models[0]!,
+        capabilities: {
+          optionDescriptors: [
+            {
+              id: "reasoningEffort",
+              label: "Effort",
+              type: "select" as const,
+              options: [{ id: "xhigh", label: "Extra high" }],
+            },
+          ],
+        },
+      },
+    ],
+  };
+  const routes = [
+    {
+      driver: unavailable.driver,
+      model: "claude-opus-5-5",
+      effort: "high" as const,
+      capabilities: ["coding" as const],
+      costPerTask: 1,
+    },
+    {
+      driver: alternate.driver,
+      model: "gpt-6.1-sol",
+      effort: "xhigh" as const,
+      capabilities: ["coding" as const],
+      costPerTask: 1,
+    },
+  ];
+  return Effect.gen(function* () {
+    const threads = yield* ThreadManagementService.ThreadManagementService;
+    yield* threads.dispatch({
+      ...delegationCommand(),
+      delegationTargetExplicit: true,
+      modelSelection: {
+        instanceId: unavailable.instanceId,
+        model: "claude-opus-5-5",
+        options: [{ id: "effort", value: "high" }],
+      },
+    });
+    expect(commands[0]).toMatchObject({
+      modelSelection: {
+        instanceId: alternate.instanceId,
+        model: "gpt-6.1-sol",
+        options: [{ id: "reasoningEffort", value: "xhigh" }],
+      },
+      routingDecision: {
+        substitution: {
+          requestedModel: "claude-opus-5-5",
+          reason: expect.stringContaining("usage"),
+        },
+      },
+    });
+  }).pipe(
+    Effect.provide(
+      layerDelegationTest(commands, [unavailable, alternate], true, "t3-managed", routes),
+    ),
+  );
+});
+
+it.effect("rejects invalid requested options before exhaustion substitution", () => {
+  const commands: Array<OrchestrationV2Command> = [];
+  const exhausted = {
+    ...delegationProvider,
+    usageLimits: {
+      checkedAt: "1970-01-01T00:00:00Z",
+      windows: [
+        {
+          id: "weekly",
+          label: "Weekly",
+          kind: "weekly" as const,
+          usedPercent: 100,
+          resetsAt: "1970-01-01T01:00:00Z",
+        },
+      ],
+    },
+  };
+  const peer = { ...delegationProvider, instanceId: ProviderInstanceId.make("codex_peer") };
+  return Effect.gen(function* () {
+    const threads = yield* ThreadManagementService.ThreadManagementService;
+    const error = yield* threads
+      .dispatch({
+        ...delegationCommand(),
+        delegationTargetExplicit: true,
+        modelSelection: {
+          instanceId: exhausted.instanceId,
+          model: "gpt-6.1-sol",
+          options: [{ id: "unknownOption", value: "invalid" }],
+        },
+      })
+      .pipe(Effect.flip);
+    expect(error).toMatchObject({
+      cause: { _tag: "ThreadManagementDelegationOptionsError", category: "invalid-options" },
+    });
+    expect(commands).toEqual([]);
+  }).pipe(Effect.provide(layerDelegationTest(commands, [exhausted, peer])));
+});
+
 it.effect.each(["advice", "review", "general"] as const)(
   "managed explicit Opus %s survives repeated requests",
   (role) => {

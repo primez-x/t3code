@@ -55,6 +55,7 @@ export interface RuntimeSubagent {
   readonly title: string;
   readonly role: string | null;
   readonly model: string | null;
+  readonly routingDecision?: OrchestrationV2Subagent["routingDecision"];
   readonly effort: string | null;
   readonly status: RuntimeSubagentStatus;
   readonly activationCount: number;
@@ -171,6 +172,7 @@ function workflowMembersToRuntime(
       kind: "workflow_agent" as const,
       title: agent.label,
       model: agent.model ?? null,
+      routingDecision: undefined,
       status,
       // A member the workflow retried counts each attempt as a run.
       activationCount: agent.attempt ?? 1,
@@ -205,6 +207,7 @@ export function projectedSubagentsToRuntime(
     readonly title: string | null;
     readonly prompt: string;
     readonly model: string | null;
+    readonly routingDecision?: OrchestrationV2Subagent["routingDecision"];
     readonly status: OrchestrationV2Subagent["status"];
     readonly progress?: string | undefined;
     readonly childThreadId?: string | null | undefined;
@@ -229,6 +232,7 @@ export function projectedSubagentsToRuntime(
         (subagent.prompt.length > 80 ? `${subagent.prompt.slice(0, 77)}...` : subagent.prompt),
       role: null,
       model: subagent.model,
+      routingDecision: subagent.routingDecision,
       effort: null,
       status: subagent.status,
       activationCount: 1,

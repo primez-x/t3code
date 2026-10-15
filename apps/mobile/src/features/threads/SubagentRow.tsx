@@ -19,6 +19,7 @@ type SubagentRowSubagent = Pick<
   | "threadId"
   | "childThreadId"
   | "model"
+  | "routingDecision"
   | "driver"
   | "providerInstanceId"
   | "title"
@@ -40,6 +41,7 @@ export function SubagentRow(props: {
 }) {
   const presentation = resolveSubagentRowPresentation(props.subagent);
   const detail = subagentCardDetail(presentation.detail);
+  const substitution = props.subagent.routingDecision?.substitution;
   return (
     <View className="flex-row gap-3">
       <View className="h-5 justify-center">
@@ -76,6 +78,16 @@ export function SubagentRow(props: {
           ) : null}
         </View>
         <SubagentMetadata environmentId={props.environmentId} subagent={props.subagent} />
+        {substitution ? (
+          <Text className="text-xs text-foreground-muted">
+            Requested{" "}
+            {substitution.requestedModel ??
+              substitution.requestedProviderInstanceId ??
+              substitution.requestedDriver ??
+              "target"}
+            : {substitution.reason}
+          </Text>
+        ) : null}
         {detail ? (
           <Text
             numberOfLines={3}

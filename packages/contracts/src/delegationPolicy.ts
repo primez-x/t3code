@@ -1,7 +1,7 @@
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import { IsoDateTime, TrimmedNonEmptyString } from "./baseSchemas.ts";
-import { ProviderDriverKind } from "./providerInstance.ts";
+import { ProviderDriverKind, ProviderInstanceId } from "./providerInstance.ts";
 
 export const DelegationMode = Schema.Literals(["native-preferred", "t3-managed"]);
 export type DelegationMode = typeof DelegationMode.Type;
@@ -75,5 +75,13 @@ export const DelegationRoutingDecision = Schema.Struct({
   ]),
   headroomPercent: Schema.NullOr(Schema.Number),
   usageCheckedAt: Schema.NullOr(IsoDateTime),
+  substitution: Schema.optional(
+    Schema.Struct({
+      requestedModel: Schema.optional(TrimmedNonEmptyString),
+      requestedProviderInstanceId: Schema.optional(ProviderInstanceId),
+      requestedDriver: Schema.optional(ProviderDriverKind),
+      reason: TrimmedNonEmptyString,
+    }),
+  ),
 });
 export type DelegationRoutingDecision = typeof DelegationRoutingDecision.Type;

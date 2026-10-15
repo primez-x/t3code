@@ -1,3 +1,4 @@
+import { invalidOptionSelections } from "@t3tools/shared/model";
 import type {
   OrchestrationV2SearchThreadInput,
   OrchestrationV2SearchThreadResult,
@@ -841,9 +842,46 @@ const make = Effect.gen(function* () {
       const explicit =
         command.delegationTargetExplicit === true ||
         command.delegationProviderConstraint !== undefined;
-      const requestedEfforts = requestedOptions.filter((option) =>
-        ["effort", "reasoningEffort"].includes(option.id),
-      );
+      const requestedTarget = !explicit
+        ? undefined
+        : command.delegationTargetExplicit
+          ? command.delegationProviderConstraint === undefined
+            ? command.modelSelection
+            : {
+                ...command.delegationProviderConstraint,
+                model: command.modelSelection.model,
+                options: requestedOptions,
+              }
+          : { ...command.delegationProviderConstraint, options: requestedOptions };
+      if (requestedTarget && requestedOptions.length > 0) {
+        const requestedModels = providers
+          .filter(
+            (provider) =>
+              (requestedTarget.instanceId === undefined ||
+                requestedTarget.instanceId === provider.instanceId) &&
+              (!("driver" in requestedTarget) ||
+                requestedTarget.driver === undefined ||
+                requestedTarget.driver === provider.driver),
+          )
+          .flatMap((provider) =>
+            provider.models.filter(
+              (model) =>
+                !("model" in requestedTarget) ||
+                requestedTarget.model === undefined ||
+                requestedTarget.model === model.slug ||
+                model.aliases?.includes(requestedTarget.model),
+            ),
+          );
+        if (
+          requestedModels.length > 0 &&
+          requestedModels.every(
+            (model) =>
+              invalidOptionSelections(requestedOptions, model.capabilities?.optionDescriptors)
+                .length > 0,
+          )
+        )
+          return yield* new ThreadManagementDelegationOptionsError({ category: "invalid-options" });
+      }
       const runtimeModes = new Map(
         providers.map((provider) => [
           provider.instanceId,
@@ -868,15 +906,7 @@ const make = Effect.gen(function* () {
       }));
       const selectionNowMs = yield* Clock.currentTimeMillis;
       const selection = selectDelegationTarget({
-        policy:
-          explicit && requestedEfforts.length > 0
-            ? {
-                ...policy,
-                routes: policy.routes.filter((route) =>
-                  requestedEfforts.every((option) => option.value === route.effort),
-                ),
-              }
-            : policy,
+        policy,
         providers: candidateProviders,
         parent: parent.thread.modelSelection,
         role,
@@ -889,52 +919,20 @@ const make = Effect.gen(function* () {
           ),
         ),
         allowedProviderInstanceIds: servingInstances,
-        ...(explicit
-          ? {
-              requestedTarget: command.delegationTargetExplicit
-                ? command.delegationProviderConstraint === undefined
-                  ? command.modelSelection
-                  : {
-                      ...command.delegationProviderConstraint,
-                      model: command.modelSelection.model,
-                      options: requestedOptions,
-                    }
-                : { ...command.delegationProviderConstraint, options: requestedOptions },
-            }
-          : {}),
+        ...(requestedTarget === undefined ? {} : { requestedTarget }),
         activeAssignments: parent.subagents
           .filter((task) => ["pending", "running", "waiting"].includes(task.status))
           .flatMap((task) => (task.modelSelection ? [task.modelSelection] : [])),
         excludedReviewerModels: [...excludedReviewerModels],
       });
       if (!selection.ok) return yield* selection.error;
-      if (explicit) {
-        const targetModel = providers
-          .find((provider) => provider.instanceId === selection.modelSelection.instanceId)
-          ?.models.find((model) => model.slug === selection.modelSelection.model);
-        for (const option of requestedOptions) {
-          const descriptor = targetModel?.capabilities?.optionDescriptors?.find(
-            (entry) => entry.id === option.id,
-          );
-          if (
-            !descriptor ||
-            (descriptor.type === "boolean"
-              ? typeof option.value !== "boolean"
-              : descriptor.type !== "select" ||
-                !descriptor.options.some((choice) => choice.id === option.value))
-          ) {
-            return yield* new ThreadManagementDelegationOptionsError({
-              category: "invalid-options",
-            });
-          }
-        }
-      }
+      const preserveRequestedOptions = explicit && !selection.decision.substitution;
       const chosenOptionIds = new Set(selection.modelSelection.options?.map((option) => option.id));
       return {
         ...command,
         role,
         capability,
-        modelSelection: explicit
+        modelSelection: preserveRequestedOptions
           ? {
               ...selection.modelSelection,
               options: [

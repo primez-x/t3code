@@ -162,6 +162,96 @@ describe("selectDelegationTarget", () => {
         "Astra requires unavailable or exhausted Claude accounts",
       );
   });
+  test.each(["disabled", "exhausted"])(
+    "substitutes an unavailable requested Opus review when %s and explains the switch",
+    (state) => {
+      const opus = provider(
+        "claude_main",
+        "claudeAgent",
+        ["claude-fable-5-1", "claude-opus-5-5"],
+        limits(state === "exhausted" ? 100 : 50),
+      );
+      const result = selected(
+        select({
+          role: "review",
+          providers: [codex, { ...opus, enabled: state !== "disabled" }],
+          requestedTarget: {
+            instanceId: opus.instanceId,
+            model: "claude-opus-5-5",
+            options: [{ id: "effort", value: "high" }],
+          },
+          policy: policy([
+            route("claudeAgent", "claude-fable-5-1"),
+            route("claudeAgent", "claude-opus-5-5"),
+            route("codex", "gpt-6-astra"),
+          ]),
+        }),
+      );
+      expect(result.modelSelection.model).toBe("gpt-6-astra");
+      expect(result.decision.substitution).toMatchObject({
+        requestedModel: "claude-opus-5-5",
+        requestedProviderInstanceId: opus.instanceId,
+        reason: expect.stringContaining(state === "exhausted" ? "usage" : "unavailable"),
+      });
+    },
+  );
+  test("does not substitute for low headroom while the requested model can run", () => {
+    const result = selected(
+      select({
+        requestedTarget: { instanceId: claude.instanceId, model: "claude-fable-5-1" },
+        providers: [codex, { ...claude, usageLimits: limits(99) }],
+      }),
+    );
+    expect(result.modelSelection.model).toBe("claude-fable-5-1");
+    expect(result.decision.substitution).toBeUndefined();
+  });
+  test("fails when no capable substitute exists", () => {
+    const result = select({
+      role: "review",
+      providers: [codex, { ...claude, usageLimits: limits(100) }],
+      requestedTarget: { instanceId: claude.instanceId, model: "claude-fable-5-1" },
+      policy: policy([route("claudeAgent", "claude-fable-5-1")]),
+    });
+    expect(result.ok).toBe(false);
+  });
+  test("model-only requests substitute when the provider advertising that model is unavailable", () => {
+    const opus = provider("claude_main", "claudeAgent", ["claude-opus-5-5", "claude-fable-5-1"]);
+    const result = selected(
+      select({
+        role: "review",
+        providers: [codex, { ...opus, installed: false }],
+        requestedTarget: { model: "claude-opus-5-5" },
+        policy: policy([route("claudeAgent", "claude-opus-5-5"), route("codex", "gpt-6-astra")]),
+      }),
+    );
+    expect(result.modelSelection.model).toBe("gpt-6-astra");
+    expect(result.decision.substitution?.reason).toContain("unavailable");
+  });
+  test.each(["unmapped", "hidden", "excluded", "unknown"])(
+    "exhaustion does not bypass a %s requested-model restriction",
+    (state) => {
+      const opus = provider("claude_main", "claudeAgent", ["claude-opus-5-5", "claude-fable-5-1"], {
+        ...limits(0),
+        windows: [{ ...limits(100).windows[0]!, id: "seven_day_opus" }],
+      });
+      const result = select({
+        role: "review",
+        providers: [codex, state === "unknown" ? { ...opus, installed: false } : opus],
+        requestedTarget: {
+          instanceId: opus.instanceId,
+          model: state === "unknown" ? "unknown-opus" : "claude-opus-5-5",
+        },
+        excludedReviewerModels: state === "excluded" ? ["claude-opus-5-5"] : [],
+        hiddenModelsByInstance: state === "hidden" ? { claude_main: ["claude-opus-5-5"] } : {},
+        policy: policy([
+          route("claudeAgent", "claude-fable-5-1"),
+          route("codex", "gpt-6-astra"),
+          ...(state === "unmapped" ? [] : [route("claudeAgent", "claude-opus-5-5")]),
+        ]),
+      });
+      expect(result.ok).toBe(false);
+    },
+  );
   // Pin failure cases: missing, disabled, exhausted, hidden, excluded, or unmapped targets.
   test.each(["advice", "review", "general"] as const)(
     "preserves explicit Opus for %s across separate requests",
@@ -191,7 +281,7 @@ describe("selectDelegationTarget", () => {
       }
     },
   );
-  test.each(["missing", "disabled", "exhausted", "hidden", "excluded", "unmapped"])(
+  test.each(["missing", "hidden", "excluded", "unmapped"])(
     "refuses an explicit Opus review without substitution when %s",
     (state) => {
       const opus = provider(

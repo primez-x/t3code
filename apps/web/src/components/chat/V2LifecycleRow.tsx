@@ -498,6 +498,7 @@ function SubagentTimelineLink(props: {
           elapsed={agent ? <AgentElapsed agent={projectedSubagentsToRuntime([agent])[0]!} /> : null}
           model={agent?.model ?? null}
           modelSelection={agent?.modelSelection}
+          routingDecision={agent?.routingDecision}
           status={liveStatus}
           result={agent?.result ?? props.result}
           progress={agent?.progress ?? props.progress}
@@ -511,10 +512,12 @@ function SubagentTimelineTooltip(
   props: Parameters<typeof SubagentTimelineLink>[0] & {
     model: string | null;
     modelSelection: OrchestrationV2Subagent["modelSelection"];
+    routingDecision: OrchestrationV2Subagent["routingDecision"];
     elapsed: ReactNode;
   },
 ) {
   const environmentId = props.parentRef.environmentId;
+  const substitution = props.routingDecision?.substitution;
   const parent = useThreadShell(props.parentRef)?.source;
   const child = useThreadShell(
     props.threadId ? scopeThreadRef(environmentId, props.threadId) : null,
@@ -524,24 +527,36 @@ function SubagentTimelineTooltip(
   );
   const childProject = useProject(child ? scopeProjectRef(environmentId, child.projectId) : null);
   return (
-    <SubagentTooltipContent
-      title={formatSubagentDisplayTitle(child?.title ?? props.title)}
-      model={props.model}
-      providerInstanceId={props.providerInstanceId}
-      origin={props.origin}
-      modelSelection={props.modelSelection}
-      provider={props.provider}
-      providers={props.providers}
-      driver={props.driver}
-      elapsed={props.elapsed}
-      status={props.status}
-      result={props.result}
-      progress={props.progress}
-      parentThread={parent}
-      childThread={child}
-      parentProject={parentProject ?? undefined}
-      childProject={childProject ?? undefined}
-    />
+    <>
+      <SubagentTooltipContent
+        title={formatSubagentDisplayTitle(child?.title ?? props.title)}
+        model={props.model}
+        providerInstanceId={props.providerInstanceId}
+        origin={props.origin}
+        modelSelection={props.modelSelection}
+        provider={props.provider}
+        providers={props.providers}
+        driver={props.driver}
+        elapsed={props.elapsed}
+        status={props.status}
+        result={props.result}
+        progress={props.progress}
+        parentThread={parent}
+        childThread={child}
+        parentProject={parentProject ?? undefined}
+        childProject={childProject ?? undefined}
+      />
+      {substitution ? (
+        <div className="px-1 pb-2 text-xs text-muted-foreground">
+          Requested{" "}
+          {substitution.requestedModel ??
+            substitution.requestedProviderInstanceId ??
+            substitution.requestedDriver ??
+            "target"}
+          : {substitution.reason}
+        </div>
+      ) : null}
+    </>
   );
 }
 

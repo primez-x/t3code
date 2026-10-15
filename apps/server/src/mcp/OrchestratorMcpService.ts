@@ -1,3 +1,4 @@
+import { invalidOptionSelections } from "@t3tools/shared/model";
 import {
   CommandId,
   type RunId,
@@ -51,7 +52,6 @@ import {
   type OrchestratorMcpThreadWaitInput,
   type OrchestratorMcpThreadWaitResult,
   type ProviderInteractionMode,
-  type ProviderOptionDescriptor,
   type ProviderOptionSelection,
   type RuntimeMode,
   type ScheduledTask,
@@ -299,48 +299,6 @@ function providerConstraints(
     constraints.push("Provider is not authenticated.");
   }
   return constraints;
-}
-
-/**
- * Checks requested option selections for duplicates and, when the model
- * advertises option descriptors, against those descriptors. Models without
- * descriptors skip the descriptor checks (mirroring how model slugs are only
- * validated when the provider advertises models), but duplicate ids always
- * fail: downstream consumers disagree on whether the first or last value of
- * a duplicated id wins.
- */
-function invalidOptionSelections(
-  selections: ReadonlyArray<ProviderOptionSelection>,
-  descriptors: ReadonlyArray<ProviderOptionDescriptor> | undefined,
-): ReadonlyArray<string> {
-  const problems: Array<string> = [];
-  const seen = new Set<string>();
-  for (const selection of selections) {
-    if (seen.has(selection.id)) {
-      problems.push(`Option ${selection.id} was specified more than once.`);
-      continue;
-    }
-    seen.add(selection.id);
-    if (descriptors === undefined) continue;
-    const descriptor = descriptors.find((candidate) => candidate.id === selection.id);
-    if (descriptor === undefined) {
-      const known = descriptors.map((candidate) => candidate.id).join(", ");
-      problems.push(`Unknown option ${selection.id}; supported options: ${known || "none"}.`);
-      continue;
-    }
-    if (descriptor.type === "boolean" && typeof selection.value !== "boolean") {
-      problems.push(`Option ${selection.id} expects a boolean value.`);
-      continue;
-    }
-    if (
-      descriptor.type === "select" &&
-      !descriptor.options.some((choice) => choice.id === selection.value)
-    ) {
-      const choices = descriptor.options.map((choice) => choice.id).join(", ");
-      problems.push(`Option ${selection.id} must be one of: ${choices}.`);
-    }
-  }
-  return problems;
 }
 
 function taskStatusForRun(
@@ -1910,7 +1868,7 @@ const make = Effect.gen(function* () {
           delegationConstraints: [
             "Delegated effort is capped at xhigh. Fast mode and priority service are forbidden.",
             delegationPolicy.mode === "t3-managed"
-              ? "Omit target for automatic selection. Supply target for an explicit user request in either mode. An unavailable requested target fails without substitution. Native delegation controls apply to Codex, Claude, and Muse only."
+              ? "Omit target for automatic selection. Supply target for an explicit user request in either mode. If a requested target is unavailable or exhausted, T3 selects a capable substitute and records the reason. Report the requested target, selected target, and substitution reason. Native delegation controls apply to Codex, Claude, and Muse only."
               : "T3 applies the policy to automatic targets and validates explicit targets. Native provider delegation remains available.",
           ],
           parentThreadId: parent?.thread.id ?? null,
@@ -2008,22 +1966,28 @@ const make = Effect.gen(function* () {
         // The domain service selects omitted targets and validates every resolved target.
         const automaticTarget =
           input.target?.model === undefined || input.target.providerInstanceId === undefined;
+        const unresolvedTarget: ResolvedTarget = {
+          modelSelection: {
+            instanceId: input.target?.providerInstanceId ?? parent.thread.modelSelection.instanceId,
+            model: input.target?.model ?? parent.thread.modelSelection.model,
+            ...(input.target?.options === undefined ? {} : { options: input.target.options }),
+          },
+          supportedRuntimeModes: undefined,
+        };
         const target: ResolvedTarget =
           isRetryOfAcceptedDelegation || automaticTarget
-            ? {
-                modelSelection: {
-                  instanceId:
-                    input.target?.providerInstanceId ?? parent.thread.modelSelection.instanceId,
-                  model: input.target?.model ?? parent.thread.modelSelection.model,
-                  ...(input.target?.options === undefined ? {} : { options: input.target.options }),
-                },
-                supportedRuntimeModes: undefined,
-              }
+            ? unresolvedTarget
             : yield* resolveTargetRechecking({
                 parent,
                 target: input.target,
                 providers: yield* loadProviders,
-              });
+              }).pipe(
+                Effect.catch((error) =>
+                  error.code === "provider_unavailable"
+                    ? Effect.succeed(unresolvedTarget)
+                    : Effect.fail(error),
+                ),
+              );
         const runtimeMode = isRetryOfAcceptedDelegation
           ? parent.thread.runtimeMode
           : yield* resolveRuntimeMode(

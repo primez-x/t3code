@@ -1287,7 +1287,7 @@ describe("OrchestratorMcpService provider resolution", () => {
     }),
   );
 
-  it.effect("rejects delegation to a provider without a registered adapter", () =>
+  it.effect("rejects contradictory provider and driver targets before fallback", () =>
     Effect.gen(function* () {
       const forkOnlyInstanceId = ProviderInstanceId.make("forkOnly");
       const forkShadow = yield* buildUnavailableProviderSnapshot({
@@ -1322,13 +1322,17 @@ describe("OrchestratorMcpService provider resolution", () => {
         const byInstance = yield* service
           .delegateTask(scope, {
             task: "Summarize the diff.",
-            target: { providerInstanceId: forkOnlyInstanceId, model: "unmapped" },
+            target: {
+              providerInstanceId: forkOnlyInstanceId,
+              driverKind: ProviderDriverKind.make("codex"),
+              model: "unmapped",
+            },
             mode: "async",
             clientRequestId: "delegate-fork-1",
           })
           .pipe(Effect.flip);
-        assert.equal(byInstance.code, "provider_unavailable");
-        assert.isTrue(byInstance.message.includes("No V2 provider adapter is registered."));
+        assert.equal(byInstance.code, "invalid_request");
+        assert.isTrue(byInstance.message.includes("uses driver"));
       }).pipe(Effect.provide(layerOrchestratorService.pipe(Layer.provide(layerDependencies))));
     }),
   );
@@ -1612,7 +1616,7 @@ describe("OrchestratorMcpService provider resolution", () => {
   );
 
   it.effect.each(["native-preferred", "t3-managed"] as const)(
-    "re-probes an unavailable explicit Opus target before refusal in %s",
+    "re-probes an unavailable explicit Opus target before domain fallback in %s",
     (mode) =>
       Effect.gen(function* () {
         const claudeInstanceId = ProviderInstanceId.make("claudeAgent");
@@ -1712,18 +1716,17 @@ describe("OrchestratorMcpService provider resolution", () => {
               clientRequestId,
             });
 
-          const error = yield* delegate("delegate-recheck-1").pipe(Effect.flip);
-          assert.equal(error.code, "provider_unavailable");
+          yield* delegate("delegate-recheck-1");
           assert.equal(yield* Ref.get(probes), 1);
-          assert.equal(yield* Ref.get(dispatched), 0);
+          assert.equal(yield* Ref.get(dispatched), 1);
 
           cliInstalled = true;
           const result = yield* delegate("delegate-recheck-2");
           assert.equal(result.providerInstanceId, claudeInstanceId);
           assert.equal(yield* Ref.get(probes), 2);
-          assert.equal(yield* Ref.get(dispatched), 1);
-          yield* delegate("delegate-recheck-3");
           assert.equal(yield* Ref.get(dispatched), 2);
+          yield* delegate("delegate-recheck-3");
+          assert.equal(yield* Ref.get(dispatched), 3);
         }).pipe(Effect.provide(layerOrchestratorService.pipe(Layer.provide(layerDependencies))));
       }),
   );
