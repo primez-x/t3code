@@ -307,8 +307,9 @@ export function selectDelegationTarget(input: DelegationSelectionInput): Delegat
   const balanced = input.policy.balanceUsage
     ? candidates.filter(
         (candidate) =>
-          candidate.quota.headroomPercent === null ||
-          candidate.quota.headroomPercent >= greatestHeadroom - 5,
+          greatestHeadroom === Number.NEGATIVE_INFINITY ||
+          (candidate.quota.headroomPercent !== null &&
+            candidate.quota.headroomPercent >= greatestHeadroom - 5),
       )
     : candidates;
   const alternateProvider = (candidate: Candidate) =>

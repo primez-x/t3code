@@ -110,6 +110,49 @@ describe("selectDelegationTarget", () => {
         .modelSelection.instanceId,
     ).toBe("codex_main");
   });
+  test.each([
+    undefined,
+    { ...limits(10), checkedAt: "2026-10-14T11:54:59Z" },
+    { ...limits(10), unavailable: { reason: "probeFailed" as const } },
+  ])("prefers verified headroom over unknown alternate usage (%#)", (usageLimits) => {
+    const result = selected(select({ providers: [codex, { ...claude, usageLimits }] }));
+    expect(result.modelSelection.instanceId).toBe("codex_main");
+    expect(result.decision.headroomPercent).toBe(50);
+    expect(result.decision.reason).toBe("headroom");
+  });
+  test("uses an alternate provider when all headroom is unknown", () => {
+    const result = selected(
+      select({
+        providers: [
+          { ...codex, usageLimits: undefined },
+          { ...claude, usageLimits: undefined },
+        ],
+      }),
+    );
+    expect(result.modelSelection.instanceId).toBe("claude_main");
+    expect(result.decision.headroomPercent).toBeNull();
+  });
+  test("keeps unknown usage eligible when balance is disabled", () => {
+    const result = selected(
+      select({
+        policy: { ...policy(), balanceUsage: false },
+        providers: [codex, { ...claude, usageLimits: undefined }],
+      }),
+    );
+    expect(result.modelSelection.instanceId).toBe("claude_main");
+  });
+  test("uses unknown usage when verified providers are exhausted", () => {
+    const result = selected(
+      select({
+        providers: [
+          { ...codex, usageLimits: limits(100) },
+          { ...claude, usageLimits: undefined },
+        ],
+      }),
+    );
+    expect(result.modelSelection.instanceId).toBe("claude_main");
+    expect(result.decision.headroomPercent).toBeNull();
+  });
   test("chooses the cheaper parent model when model diversity is disabled", () => {
     expect(
       selected(
