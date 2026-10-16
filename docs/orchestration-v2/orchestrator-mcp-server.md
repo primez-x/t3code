@@ -259,14 +259,17 @@ provider session. The request becomes the V2 command
 `mode: "async"` returns the current durable state immediately.
 `mode: "wait"` waits for the task result, including nested work and completion follow-ups, or until
 the timeout expires. A wait timeout does not cancel the child; the result sets
-`waitTimedOut: true`, and the caller can continue with `task_status`.
+`waitTimedOut: true`, and the caller can continue with `task_status`. A pending blocking
+question also ends the wait with `hasPendingQuestion: true` and `waitTimedOut: false`.
+If `hasPendingQuestion`, pass `threadId=childThreadId` to `t3_pending_request_list`,
+`t3_pending_request_read` (with `requestId`) and `t3_pending_request_respond`, or ask
+the user; the task's completion still wakes this thread. Async questions and approvals
+do not end the wait.
 
-A child that asks a structured question blocks until someone answers the question, and
-nobody watches the child's thread. So a question ends a wait early with
-`workState: "waiting_for_input"`, and outside a blocking wait the server queues a
-`delegated_task` notification on the parent. The parent answers with
-`t3_pending_request_respond` on `childThreadId`. Approval requests are not part of
-this path; only a person can approve them.
+Nobody watches a delegated child's thread. Outside a blocking wait, a blocking
+question therefore queues a `delegated_task` notification on the parent with the
+child thread and request IDs, so an async parent also hears about the question.
+Approval requests are not part of this path; only a person can approve them.
 
 ```ts
 type DelegateTaskResult = {
@@ -275,8 +278,7 @@ type DelegateTaskResult = {
   childRunId: string | null;
   childNodeId: string;
   status: "queued" | "running" | "waiting" | "completed" | "failed" | "cancelled" | "interrupted";
-  workState: "working" | "waiting_for_children" | "waiting_for_input" | "result_available";
-  pendingQuestionRequestIds: string[];
+  workState: "working" | "waiting_for_children" | "result_available";
   hasPendingChildRuns: boolean;
   providerInstanceId: string;
   model: string | null;
@@ -286,6 +288,7 @@ type DelegateTaskResult = {
   latestTerminalStatus: "completed" | "failed" | "cancelled" | "interrupted" | null;
   latestTerminalSummary: string | null;
   latestTerminalResultContextTransferId: string | null;
+  hasPendingQuestion: boolean;
   waitTimedOut: boolean;
 };
 ```
@@ -459,6 +462,19 @@ Terminal provider events trigger finalization. The event stream first replays
 persisted events and then follows live events, so finalization also runs after
 a server restart. An existing `subagent_result` transfer makes finalization
 idempotent.
+
+Users rarely watch child threads, so a child question would otherwise go
+unanswered. When a child opens a pending `user_input` request, the parent gets
+a notification message telling it to answer with the pending request tools or
+ask the user. The message says whether the child is blocked or, for a Codex
+async question, still working. If the question is answered or dismissed before
+the notification starts a turn, that queued turn is cancelled. Approvals are not
+routed, because those tools cannot answer them.
+A parent still blocked in a `delegate_task` wait gets the blocking question
+through that wait instead.
+If the provider cuts that wait short, a still-pending live question wakes the
+parent when its launching run completes, fails, or waits for post-turn work.
+Stopping or interrupting the parent prevents this catch-up.
 
 A failed run exposes its provider error before any progress text. Successful
 results use the latest assistant content from the final work turn.

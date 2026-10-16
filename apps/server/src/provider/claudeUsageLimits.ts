@@ -1,4 +1,3 @@
-/** Claude subscription quotas from account probes and sparse runtime events. */
 // @effect-diagnostics-next-line nodeBuiltinImport:off -- Scope IDs require a synchronous digest.
 import * as NodeCrypto from "node:crypto";
 
@@ -185,7 +184,6 @@ export function claudeUsageResponseToLimits(input: {
   };
 }
 
-/** Probe-side helper: remember the scoped event target on this instance. */
 export const recordClaudeUsageResponse = (
   namesRef: Ref.Ref<ClaudeScopedLimitNames>,
   input: Parameters<typeof claudeUsageResponseToLimits>[0],

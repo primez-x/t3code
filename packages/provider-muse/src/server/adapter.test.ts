@@ -528,6 +528,32 @@ describe("MuseAdapterV2", () => {
     }).pipe(Effect.scoped, Effect.provide(testLayer)),
   );
 
+  it.effect("selects the runtime mode's permission profile on native start and resume", () =>
+    Effect.gen(function* () {
+      for (const [runtimeMode, profile, approvalMode] of [
+        ["approval-required", ":ask-me", "promptUnmatched"],
+        ["full-access", ":unrestricted", "allowAll"],
+      ] as const) {
+        const policy = ProviderAdapter.ProviderAdapterV2RuntimePolicy.make({
+          ...runtimePolicy,
+          runtimeMode,
+        });
+        const fresh = yield* makeFakeMuse();
+        yield* makeHarness(fresh, INSTANCE_ID, undefined, undefined, undefined, policy);
+        const started = yield* fresh.takeCall("session/start");
+        assert.strictEqual(started.params.permissionProfile, profile);
+        assert.strictEqual(started.params.approvalMode, approvalMode);
+
+        const saved = yield* makeFakeMuse();
+        yield* makeHarness(saved, INSTANCE_ID, "saved-session", undefined, undefined, policy);
+        const resumed = yield* saved.takeCall("session/resume");
+        assert.strictEqual(resumed.params.permissionProfile, profile);
+        const mode = yield* saved.takeCall("session/setApprovalMode");
+        assert.strictEqual(mode.params.mode, approvalMode);
+      }
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
   it.effect("rejects a host without session MCP support before opening a native session", () =>
     Effect.gen(function* () {
       yield* (yield* McpProviderSessions.McpProviderSessions).set({
@@ -698,7 +724,6 @@ describe("MuseAdapterV2", () => {
   it.effect("moves a resumed session on another model back to the catalog default", () =>
     Effect.gen(function* () {
       const fake = yield* makeFakeMuse();
-      // The saved session last ran MODEL; the catalog's default is another model.
       const harness = yield* makeHarness(
         fake,
         INSTANCE_ID,
@@ -802,7 +827,6 @@ describe("MuseAdapterV2", () => {
         });
         const result = yield* makeHarness(fake).pipe(Effect.exit);
         assert.strictEqual(result._tag, "Failure");
-        // A failed host closes in the background so the failure shows at once.
         yield* Effect.promise(() => fake.host.exited);
         assert.strictEqual(fake.closeCount(), 1);
         assert.strictEqual(fake.calls.filter((call) => call.method === "turn/start").length, 0);
@@ -925,7 +949,6 @@ describe("MuseAdapterV2", () => {
         .respondToRuntimeRequest({ requestId: pending.runtimeRequest.id, decision: "decline" })
         .pipe(Effect.forkScoped);
       yield* fake.takeCall("approval/decide");
-      // Muse's native decision for this choice maps to decline too; "cancel" proves it was ours.
       yield* fake.emit("approval/resolved", {
         approvalId: "approval-1",
         turnId: nativeId,
@@ -954,11 +977,9 @@ describe("MuseAdapterV2", () => {
         runtimePolicy,
         { continuationRequests: { offer: (request) => Effect.sync(() => offers.push(request)) } },
       );
-      // A finished workflow's report turn starts while T3 runs nothing: it is held.
       yield* fake.emit("turn/started", { turnId: "report-1" });
       yield* Effect.yieldNow;
       assert.lengthOf(offers, 1);
-      // The user sends a message first; Muse runs the report before it.
       const { nativeId } = yield* startConversation(harness, fake);
       yield* fake.emit("approval/requested", approval("report-1"));
       const asked = yield* harness.takeEvent(
@@ -975,7 +996,6 @@ describe("MuseAdapterV2", () => {
       yield* fake.emit("turn/completed", { turnId: nativeId, terminal: "completed" });
       const terminal = yield* harness.takeEvent("turn.terminal");
       assert.strictEqual(terminal.status, "completed");
-      // The user turn took it, so the continuation is not dispatched.
       const dispatched = yield* offers[0]!.dispatchIfCurrent!(Effect.succeed("run"));
       assert.isTrue(Option.isNone(dispatched));
     }).pipe(Effect.scoped, Effect.provide(testLayer)),
@@ -988,7 +1008,6 @@ describe("MuseAdapterV2", () => {
       const { nativeId } = yield* startConversation(harness, fake);
       yield* fake.emit("turn/completed", { turnId: nativeId, terminal: "completed" });
       yield* harness.takeEvent("turn.terminal");
-      // Muse runs workflow children without the session's allowAll mode.
       const childApproval = { ...approval("child-run-1"), subagentOrigin: { subagentId: "a7" } };
       yield* fake.emit("approval/requested", childApproval);
       const asked = yield* harness.takeEvent("runtime_request.updated");
@@ -1200,8 +1219,6 @@ describe("MuseAdapterV2", () => {
       const fake = yield* makeFakeMuse();
       const harness = yield* makeHarness(fake);
       const { nativeId } = yield* startConversation(harness, fake);
-      // Neither the tool call that wrote the list nor Muse's per-step reminder
-      // child may show as a generic tool row.
       yield* fake.emit("item/completed", {
         turnId: nativeId,
         item: {
@@ -1315,7 +1332,6 @@ describe("MuseAdapterV2", () => {
           result: { summary: "All done" },
         },
       });
-      // The revision without a role keeps the title the child thread opened with.
       const completed = yield* harness.takeEvent(
         "subagent.updated",
         (event) => event.subagent.status === "completed",
