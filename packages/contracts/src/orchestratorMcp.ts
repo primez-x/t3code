@@ -17,6 +17,7 @@ import {
   PositiveInt,
   ProjectId,
   RunId,
+  RuntimeRequestId,
   ScheduledTaskId,
   SecretRef,
   ThreadId,
@@ -209,7 +210,16 @@ export const OrchestratorMcpDelegateTaskResult = Schema.Struct({
   childRunId: Schema.NullOr(RunId),
   childNodeId: NodeId,
   status: OrchestratorMcpDelegatedTaskStatus,
-  workState: Schema.Literals(["working", "waiting_for_children", "result_available"]),
+  workState: Schema.Literals([
+    "working",
+    "waiting_for_children",
+    "waiting_for_input",
+    "result_available",
+  ]),
+  pendingQuestionRequestIds: Schema.Array(RuntimeRequestId).annotate({
+    description:
+      "Questions the child asked that nobody answered yet. The child is blocked until each one gets an answer. Read one with t3_pending_request_read and answer with t3_pending_request_respond, passing childThreadId as threadId.",
+  }),
   hasPendingChildRuns: Schema.Boolean,
   latestTerminalRunId: Schema.NullOr(RunId),
   latestTerminalStatus: Schema.NullOr(OrchestratorMcpTerminalDelegatedTaskStatus),

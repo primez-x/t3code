@@ -15,6 +15,7 @@ import {
   ProviderInstanceId,
   ProviderThreadId,
   RunId,
+  RuntimeRequestId,
   ThreadId,
   TurnItemId,
 } from "@t3tools/contracts";
@@ -1835,6 +1836,209 @@ it.layer(layerTest)("delegated tasks across a server restart", (it) => {
       assert.deepEqual(
         projection.runs.find((row) => row.id === runId)?.delegatedCompletion?.delivery?.taskIds,
         [child.taskId],
+      );
+    }),
+  );
+});
+
+const questionEvent = (input: {
+  readonly childThreadId: ThreadId;
+  readonly name: string;
+  readonly status: "pending" | "resolved";
+  readonly now: DateTime.Utc;
+}) => ({
+  id: EventId.make(`event:${input.name}:question:${input.status}`),
+  type: "runtime-request.updated" as const,
+  threadId: input.childThreadId,
+  nodeId: NodeId.make(`node:${input.name}:question`),
+  occurredAt: input.now,
+  payload: {
+    id: RuntimeRequestId.make(`request:${input.name}`),
+    nodeId: NodeId.make(`node:${input.name}:question`),
+    providerTurnId: null,
+    nativeRequestRef: null,
+    kind: "user_input" as const,
+    status: input.status,
+    responseCapability: { type: "message" as const },
+    createdAt: input.now,
+    resolvedAt: input.status === "pending" ? null : input.now,
+  },
+});
+
+const questionWakeId = (name: string) =>
+  MessageId.make(`message:delegated-question:request:${name}`);
+
+/** The wake's own persisted message; the listener handles requests in commit order. */
+const awaitQuestionWake = (threadId: ThreadId, name: string, afterSequence: number) =>
+  Effect.gen(function* () {
+    const eventSink = yield* EventSink.EventSinkV2;
+    const wake = yield* eventSink
+      .stream({ threadId, afterSequence, eventType: "message.updated" })
+      .pipe(
+        Stream.filter(
+          (stored) =>
+            stored.event.type === "message.updated" &&
+            stored.event.payload.id === questionWakeId(name),
+        ),
+        Stream.runHead,
+      );
+    assert.isTrue(wake._tag === "Some");
+  });
+
+const seedQuestionParent = (name: string, parentStatus: "running" | "completed") =>
+  Effect.gen(function* () {
+    const eventSink = yield* EventSink.EventSinkV2;
+    const now = yield* DateTime.now;
+    const threadId = ThreadId.make(`thread:${name}`);
+    const projectId = ProjectId.make(`project:${name}`);
+    const runId = RunId.make(`run:${name}`);
+    const rootNodeId = NodeId.make(`node:${name}-root`);
+    yield* seedParentWithTerminalTask({
+      threadId,
+      projectId,
+      runId,
+      rootNodeId,
+      taskId: NodeId.make(`node:${name}-done`),
+      deliveryState: "delivered",
+      now,
+    });
+    if (parentStatus === "completed") {
+      yield* eventSink.write({
+        commandId: reconcileCommandId(`${name}-ended`),
+        events: [
+          runEvent({
+            threadId,
+            runId,
+            ordinal: 1,
+            status: "completed",
+            now,
+            providerThreadId: parentProviderThreadId(threadId),
+            userMessageId: MessageId.make(`message:seed-user:${threadId}`),
+          }),
+        ],
+      });
+    }
+    const child = (childName: string, completionWake: "always" | "settled_only") =>
+      seedRestartCancelledChild({
+        parentThreadId: threadId,
+        projectId,
+        parentRunId: runId,
+        rootNodeId,
+        name: childName,
+        completionWake,
+        continuationPending: false,
+        runStatus: "completed",
+        now,
+      });
+    return { threadId, now, child };
+  });
+
+it.layer(layerTest)("delegated task questions", (it) => {
+  it.effect("wakes an idle parent once for each pending child question", () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const eventSink = yield* EventSink.EventSinkV2;
+      const parent = yield* seedQuestionParent("question-idle", "completed");
+      const answered = yield* parent.child("question-idle-answered", "always");
+      const asking = yield* parent.child("question-idle-asking", "always");
+      const afterSequence = yield* eventSink.latestSequence();
+
+      // An answered question needs nobody; the pending one, replayed by a
+      // later update, wakes the parent once.
+      yield* eventSink.write({
+        commandId: reconcileCommandId("question-idle-requests"),
+        events: [
+          questionEvent({
+            childThreadId: answered.childThreadId,
+            name: "question-idle-answered",
+            status: "resolved",
+            now: parent.now,
+          }),
+          questionEvent({
+            childThreadId: asking.childThreadId,
+            name: "question-idle-asking",
+            status: "pending",
+            now: parent.now,
+          }),
+        ],
+      });
+      yield* awaitQuestionWake(parent.threadId, "question-idle-asking", afterSequence);
+      const replaySequence = yield* eventSink.latestSequence();
+      yield* eventSink.write({
+        commandId: reconcileCommandId("question-idle-replay"),
+        events: [
+          {
+            ...questionEvent({
+              childThreadId: asking.childThreadId,
+              name: "question-idle-asking",
+              status: "pending",
+              now: parent.now,
+            }),
+            id: EventId.make("event:question-idle-asking:replay"),
+          },
+          questionEvent({
+            childThreadId: answered.childThreadId,
+            name: "question-idle-marker",
+            status: "pending",
+            now: parent.now,
+          }),
+        ],
+      });
+      yield* awaitQuestionWake(parent.threadId, "question-idle-marker", replaySequence);
+
+      const projection = yield* orchestrator.getThreadProjection(parent.threadId);
+      const wakes = projection.messages.filter(
+        (message) => message.id === questionWakeId("question-idle-asking"),
+      );
+      assert.equal(wakes.length, 1);
+      assert.deepEqual(wakes[0]?.notification?.source, {
+        kind: "delegated_task",
+        taskIds: [asking.taskId],
+        childThreadId: asking.childThreadId,
+      });
+      assert.include(wakes[0]?.text, `"threadId":"${asking.childThreadId}"`);
+      assert.include(wakes[0]?.text, `"requestId":"request:question-idle-asking"`);
+      assert.isUndefined(
+        projection.messages.find(
+          (message) => message.id === questionWakeId("question-idle-answered"),
+        ),
+      );
+    }),
+  );
+
+  it.effect("leaves a question to the parent's blocking wait", () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const eventSink = yield* EventSink.EventSinkV2;
+      const parent = yield* seedQuestionParent("question-live", "running");
+      const waited = yield* parent.child("question-live-waited", "settled_only");
+      const async = yield* parent.child("question-live-async", "always");
+      const afterSequence = yield* eventSink.latestSequence();
+
+      yield* eventSink.write({
+        commandId: reconcileCommandId("question-live-requests"),
+        events: [
+          questionEvent({
+            childThreadId: waited.childThreadId,
+            name: "question-live-waited",
+            status: "pending",
+            now: parent.now,
+          }),
+          questionEvent({
+            childThreadId: async.childThreadId,
+            name: "question-live-async",
+            status: "pending",
+            now: parent.now,
+          }),
+        ],
+      });
+      yield* awaitQuestionWake(parent.threadId, "question-live-async", afterSequence);
+
+      const projection = yield* orchestrator.getThreadProjection(parent.threadId);
+      assert.isUndefined(
+        projection.messages.find(
+          (message) => message.id === questionWakeId("question-live-waited"),
+        ),
       );
     }),
   );

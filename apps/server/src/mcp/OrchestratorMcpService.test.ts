@@ -12,6 +12,7 @@ import {
   ProviderDriverKind,
   ProviderInstanceId,
   RunId,
+  RuntimeRequestId,
   ThreadId,
   type OrchestrationV2ThreadProjection,
   type ServerProvider,
@@ -97,6 +98,7 @@ describe("OrchestratorMcpService", () => {
         messages: [],
         subagents: [],
         providerThreads: [],
+        runtimeRequests: [],
       } as unknown as OrchestrationV2ThreadProjection;
       let hasNestedWork = true;
       const layerDependencies = Layer.mergeAll(
@@ -224,6 +226,7 @@ describe("OrchestratorMcpService", () => {
         messages: [],
         subagents: [],
         providerThreads: [],
+        runtimeRequests: [],
         turnItems: [],
       } as unknown as OrchestrationV2ThreadProjection;
       const layerDependencies = Layer.mergeAll(
@@ -279,6 +282,103 @@ describe("OrchestratorMcpService", () => {
     }),
   );
 
+  it.effect("reports a child blocked on a question as waiting for input", () =>
+    Effect.gen(function* () {
+      const parentThreadId = ThreadId.make("thread:mcp-question-parent");
+      const childThreadId = ThreadId.make("thread:mcp-question-child");
+      const taskId = NodeId.make("node:mcp-question-task");
+      const question = (id: string, kind: string, status: string) => ({
+        id: RuntimeRequestId.make(id),
+        kind,
+        status,
+      });
+      let runtimeRequests = [
+        question("request:mcp-question-open", "user_input", "pending"),
+        // The parent cannot approve permissions, and an answered question needs nobody.
+        question("request:mcp-question-approval", "command", "pending"),
+        question("request:mcp-question-answered", "user_input", "resolved"),
+      ];
+      const parentProjection = {
+        thread: { id: parentThreadId },
+        runs: [],
+        contextTransfers: [],
+        subagents: [
+          {
+            id: taskId,
+            threadId: parentThreadId,
+            origin: "app_owned",
+            childThreadId,
+            driver: "codex",
+            model: "gpt-5.6-terra",
+            status: "running",
+            result: null,
+            completionDelivery: { state: "pending" },
+          },
+        ],
+      } as unknown as OrchestrationV2ThreadProjection;
+      const childProjection = () =>
+        ({
+          thread: { id: childThreadId },
+          runs: [
+            {
+              id: RunId.make("run:mcp-question-child"),
+              ordinal: 1,
+              status: "running",
+              delegatedTaskId: taskId,
+            },
+          ],
+          contextTransfers: [],
+          messages: [],
+          subagents: [],
+          providerThreads: [],
+          runtimeRequests,
+          turnItems: [],
+        }) as unknown as OrchestrationV2ThreadProjection;
+      const layerDependencies = Layer.mergeAll(
+        NodeServices.layer,
+        Layer.mock(ThreadManagementService.ThreadManagementService)({
+          getThreadRecords: (threadId) =>
+            Effect.succeed(threadId === parentThreadId ? parentProjection : childProjection()),
+          delegatedTaskResultPending: () => Effect.succeed(false),
+        }),
+        ServerSettings.layerTest(),
+        Layer.mock(ProviderRegistry.ProviderRegistry)({ getProviders: Effect.succeed([]) }),
+        Layer.mock(ProviderAdapterRegistry.ProviderAdapterRegistryV2)({
+          list: () => Effect.succeed([]),
+        }),
+        Layer.mock(ProjectService.ProjectService)({}),
+        Layer.mock(SecretRequests.SecretRequests)({}),
+        Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
+      );
+      const scope: McpInvocationScope = {
+        environmentId: EnvironmentId.make("environment:mcp-question"),
+        requestNamespace: "provider-session:mcp-question",
+        thread: {
+          threadId: parentThreadId,
+          providerSessionId: "provider-session:mcp-question",
+          providerInstanceId: ProviderInstanceId.make("codex"),
+        },
+        client: undefined,
+        capabilities: new Set(["orchestration"]),
+        issuedAt: 1,
+      };
+
+      yield* Effect.gen(function* () {
+        const service = yield* OrchestratorMcpService.OrchestratorMcpService;
+        const blocked = yield* service.taskStatus(scope, taskId);
+        assert.equal(blocked.status, "running");
+        assert.equal(blocked.workState, "waiting_for_input");
+        assert.deepEqual(blocked.pendingQuestionRequestIds, [
+          RuntimeRequestId.make("request:mcp-question-open"),
+        ]);
+        runtimeRequests = runtimeRequests.map((request) => ({ ...request, status: "resolved" }));
+        const answered = yield* service.taskStatus(scope, taskId);
+        assert.equal(answered.workState, "working");
+        assert.deepEqual(answered.pendingQuestionRequestIds, []);
+      }).pipe(Effect.provide(layerOrchestratorService.pipe(Layer.provide(layerDependencies))));
+    }),
+  );
+
   it.effect("does not dispose delivery when a nonterminal task has no active child run", () =>
     Effect.gen(function* () {
       const parentThreadId = ThreadId.make("thread:mcp-cancel-parent");
@@ -309,6 +409,7 @@ describe("OrchestratorMcpService", () => {
         messages: [],
         subagents: [],
         providerThreads: [],
+        runtimeRequests: [],
       } as unknown as OrchestrationV2ThreadProjection;
       const layerDependencies = Layer.mergeAll(
         NodeServices.layer,
@@ -386,6 +487,7 @@ describe("OrchestratorMcpService", () => {
         messages: [],
         subagents: [],
         providerThreads: [],
+        runtimeRequests: [],
       } as unknown as OrchestrationV2ThreadProjection;
       const layerDependencies = Layer.mergeAll(
         NodeServices.layer,
@@ -466,6 +568,7 @@ describe("OrchestratorMcpService", () => {
         messages: [],
         subagents: [],
         providerThreads: [],
+        runtimeRequests: [],
       } as unknown as OrchestrationV2ThreadProjection;
       const layerDependencies = Layer.mergeAll(
         NodeServices.layer,
@@ -553,6 +656,7 @@ describe("OrchestratorMcpService", () => {
         messages: [],
         subagents: [],
         providerThreads: [],
+        runtimeRequests: [],
       } as unknown as OrchestrationV2ThreadProjection;
       const layerDependencies = Layer.mergeAll(
         NodeServices.layer,
@@ -656,6 +760,7 @@ describe("OrchestratorMcpService", () => {
               appOwnedTask("node:mcp-cancel-grandchild-below", childThreadId, grandchildThreadId),
             ],
             providerThreads: [],
+            runtimeRequests: [],
           },
         ],
         [
@@ -667,6 +772,7 @@ describe("OrchestratorMcpService", () => {
             messages: [],
             subagents: [],
             providerThreads: [],
+            runtimeRequests: [],
           },
         ],
       ]) as unknown as ReadonlyMap<ThreadId, OrchestrationV2ThreadProjection>;
@@ -884,6 +990,7 @@ describe("OrchestratorMcpService provider resolution", () => {
     messages: [],
     subagents: [],
     providerThreads: [],
+    runtimeRequests: [],
     turnItems: [],
   } as unknown as OrchestrationV2ThreadProjection;
 

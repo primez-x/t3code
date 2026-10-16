@@ -11309,10 +11309,81 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       ),
     );
 
+  // A delegated child that asks a question blocks until someone answers the
+  // question, and nobody watches the child's thread. Wake the parent agent that owns the task.
+  // A parent inside a blocking delegate_task wait is skipped: that wait returns
+  // with the question instead.
+  const wakeParentForChildQuestion = (stored: OrchestrationV2StoredEvent) =>
+    Effect.gen(function* () {
+      if (stored.event.type !== "runtime-request.updated") return;
+      const request = stored.event.payload;
+      const childThreadId = stored.event.threadId;
+      const parentThreadId = yield* appOwnedSubagentParentThreadId(childThreadId);
+      if (parentThreadId === undefined) return;
+      const parent = yield* projectionStore.getThreadRecords(parentThreadId, ["runs", "subagents"]);
+      const task = parent.subagents.findLast(
+        (candidate) =>
+          candidate.origin === "app_owned" &&
+          candidate.childThreadId === childThreadId &&
+          !isTerminalDelegatedTaskStatus(candidate.status),
+      );
+      if (
+        task === undefined ||
+        parent.thread.archivedAt !== null ||
+        parent.thread.deletedAt !== null ||
+        (task.completionWake === "settled_only" && hasLiveRun(parent))
+      )
+        return;
+      const call = (tool: string) =>
+        `\`${tool}({"threadId":"${childThreadId}","requestId":"${request.id}"})\``;
+      const text = [
+        `Delegated task ${task.id} asked a question and is blocked until the question gets an answer.`,
+        `Read the question with ${call("t3_pending_request_read")}, then answer with \`t3_pending_request_respond\` and the same threadId and requestId.`,
+        "Answer from the task brief and your own context. Ask the user only when the decision is genuinely theirs, then relay their answer to the task. If the request is no longer pending, someone already answered the question.",
+      ].join("\n\n");
+      yield* dispatchWithReceipt({
+        type: "message.dispatch",
+        commandId: CommandId.make(`command:delegated-question:${request.id}`),
+        threadId: parentThreadId,
+        messageId: MessageId.make(`message:delegated-question:${request.id}`),
+        text,
+        notification: {
+          source: { kind: "delegated_task", taskIds: [task.id], childThreadId },
+          outcome: "updated",
+          summary: "Delegated task asked a question",
+          detail: text,
+        },
+        attachments: [],
+        dispatchMode: { type: "queue_after_active" },
+        createdBy: "agent",
+        creationSource: "server",
+      });
+    }).pipe(
+      Effect.catchCause((cause) =>
+        Effect.logWarning("Failed to wake the parent for a delegated task question", {
+          threadId: stored.event.threadId,
+          sequence: stored.sequence,
+          cause,
+        }),
+      ),
+    );
+
   // Historical terminal events are already represented by the projections
   // below. Replaying the full event table on every server start delays live
   // queue promotion in proportion to the lifetime size of the database.
   const terminalEventsAfterSequence = yield* eventSink.latestSequence().pipe(Effect.orDie);
+  yield* eventSink
+    .stream({ afterSequence: terminalEventsAfterSequence, eventType: "runtime-request.updated" })
+    .pipe(
+      Stream.filter(
+        (stored) =>
+          stored.event.type === "runtime-request.updated" &&
+          stored.event.payload.kind === "user_input" &&
+          stored.event.payload.status === "pending",
+      ),
+      Stream.runForEach(wakeParentForChildQuestion),
+      Effect.forkDetach,
+    );
   // Queue promotion can wait on a provider or a thread lock. Subscribe to run
   // updates before buffering so that wait never retains unrelated tool bodies.
   yield* eventSink

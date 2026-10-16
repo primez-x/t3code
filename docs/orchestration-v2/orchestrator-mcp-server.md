@@ -261,6 +261,13 @@ provider session. The request becomes the V2 command
 the timeout expires. A wait timeout does not cancel the child; the result sets
 `waitTimedOut: true`, and the caller can continue with `task_status`.
 
+A child that asks a structured question blocks until someone answers the question, and
+nobody watches the child's thread. So a question ends a wait early with
+`workState: "waiting_for_input"`, and outside a blocking wait the server queues a
+`delegated_task` notification on the parent. The parent answers with
+`t3_pending_request_respond` on `childThreadId`. Approval requests are not part of
+this path; only a person can approve them.
+
 ```ts
 type DelegateTaskResult = {
   taskId: string;
@@ -268,7 +275,8 @@ type DelegateTaskResult = {
   childRunId: string | null;
   childNodeId: string;
   status: "queued" | "running" | "waiting" | "completed" | "failed" | "cancelled" | "interrupted";
-  workState: "working" | "waiting_for_children" | "result_available";
+  workState: "working" | "waiting_for_children" | "waiting_for_input" | "result_available";
+  pendingQuestionRequestIds: string[];
   hasPendingChildRuns: boolean;
   providerInstanceId: string;
   model: string | null;

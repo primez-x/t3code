@@ -116,6 +116,7 @@ const TASK_WAKE_EVENTS = [
   { thread: "child", eventType: "run.updated" },
   { thread: "child", eventType: "subagent.updated" },
   { thread: "child", eventType: "provider-thread.updated" },
+  { thread: "child", eventType: "runtime-request.updated" },
 ] as const;
 /** A person answers the card, so a slower poll is plenty. */
 const SECRET_REQUEST_POLL_INTERVAL_MS = 500;
@@ -1306,11 +1307,21 @@ const make = Effect.gen(function* () {
       const childControls = yield* threadManagement
         .getThreadRecords(
           task.childThreadId,
-          ["runs", "messages", "contextTransfers", "subagents", "providerThreads"],
+          [
+            "runs",
+            "messages",
+            "contextTransfers",
+            "subagents",
+            "providerThreads",
+            "runtimeRequests",
+          ],
           { messageRoles: ["user"] },
         )
         .pipe(Effect.mapError(threadManagementFailure));
       const childRun = delegatedTaskRun(childControls, task);
+      const pendingQuestionRequestIds = childControls.runtimeRequests
+        .filter((request) => request.kind === "user_input" && request.status === "pending")
+        .map((request) => request.id);
       const terminalRun = latestTerminalResultRun(childControls, childRun);
       const progress = delegatedTaskProgress(childControls);
       const taskResultRun =
@@ -1352,7 +1363,13 @@ const make = Effect.gen(function* () {
           .delegatedTaskResultPending(task.childThreadId, childRun?.delegatedTaskId)
           .pipe(Effect.mapError(threadManagementFailure)));
       const workState =
-        task.result !== null ? "result_available" : heldForRestart ? "working" : taskWorkState;
+        task.result !== null
+          ? "result_available"
+          : pendingQuestionRequestIds.length > 0
+            ? "waiting_for_input"
+            : heldForRestart
+              ? "working"
+              : taskWorkState;
       const status =
         task.result !== null
           ? taskStatusForRun(
@@ -1397,6 +1414,7 @@ const make = Effect.gen(function* () {
         childNodeId: task.id,
         status,
         workState,
+        pendingQuestionRequestIds,
         hasPendingChildRuns: hasPendingChildRuns(childProjection, childRun),
         providerInstanceId: task.providerInstanceId,
         model: task.model,
@@ -1449,6 +1467,10 @@ const make = Effect.gen(function* () {
       return response;
     });
 
+  // A blocked child cannot finish, so a question ends the wait like a result does.
+  const waitIsOver = (task: OrchestratorMcpDelegateTaskResult) =>
+    isTerminalTaskStatus(task.status) || task.pendingQuestionRequestIds.length > 0;
+
   // Re-read the task only when an event on the parent or child thread can
   // change its status, instead of polling the projections every 50 ms.
   const waitForTask = (scope: McpThreadInvocationScope, taskId: NodeId, timeoutMs: number) =>
@@ -1464,7 +1486,7 @@ const make = Effect.gen(function* () {
         .getThreadEventSequence(scope.thread.threadId)
         .pipe(Effect.mapError(streamError));
       const initial = yield* readTask(scope, taskId, false, true);
-      if (isTerminalTaskStatus(initial.status)) return Option.some(initial);
+      if (waitIsOver(initial)) return Option.some(initial);
       // One stream per event type, so transcript events never fill a buffer.
       return yield* Stream.mergeAll(
         TASK_WAKE_EVENTS.map(({ thread, eventType }) =>
@@ -1478,7 +1500,7 @@ const make = Effect.gen(function* () {
       ).pipe(
         Stream.mapError(streamError),
         Stream.mapEffect(() => readTask(scope, taskId, false, true)),
-        Stream.filter((result) => isTerminalTaskStatus(result.status)),
+        Stream.filter(waitIsOver),
         Stream.runHead,
       );
     }).pipe(Effect.timeoutOption(Duration.millis(timeoutMs)), Effect.map(Option.flatten));
@@ -2112,13 +2134,13 @@ const make = Effect.gen(function* () {
           Math.max(1, input.timeoutMs ?? DEFAULT_WAIT_TIMEOUT_MS),
         );
         const waited = yield* waitForTask(scope, taskId, timeoutMs);
-        if (Option.isSome(waited)) {
+        if (Option.isSome(waited) && isTerminalTaskStatus(waited.value.status)) {
           return waited.value;
         }
-        // The blocking wait timed out, so it no longer owns delivery: upgrade
-        // the task so a later terminal wakes the parent even mid-turn. Best
-        // effort; on failure the settled_only policy still wakes a settled
-        // parent.
+        // The blocking wait timed out or returned a question, so the wait no
+        // longer owns delivery: upgrade the task so a later terminal or question
+        // wakes the parent even mid-turn. Best effort; on failure the settled_only
+        // policy still wakes a settled parent.
         yield* threadManagement
           .dispatch({
             type: "delegated_task.wake-policy",
@@ -2154,7 +2176,7 @@ const make = Effect.gen(function* () {
               }),
             ),
           );
-        return yield* readTask(scope, taskId, true, true);
+        return Option.isSome(waited) ? waited.value : yield* readTask(scope, taskId, true, true);
       }),
     taskStatus: (callerScope, taskId) =>
       Effect.gen(function* () {
