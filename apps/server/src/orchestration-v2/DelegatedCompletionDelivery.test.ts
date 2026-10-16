@@ -1991,6 +1991,12 @@ it.layer(layerTest)("delegated task questions", (it) => {
         (message) => message.id === questionWakeId("question-idle-asking"),
       );
       assert.equal(wakes.length, 1);
+      // Nothing runs on the idle parent, so the wake starts a turn instead of queueing.
+      const wakeRun = projection.runs.find(
+        (run) => run.userMessageId === questionWakeId("question-idle-asking"),
+      );
+      assert.isDefined(wakeRun);
+      assert.notEqual(wakeRun?.status, "queued");
       assert.deepEqual(wakes[0]?.notification?.source, {
         kind: "delegated_task",
         taskIds: [asking.taskId],
