@@ -595,6 +595,190 @@ describe("makeManagedServerProvider", () => {
     ).pipe(Effect.provide(layerAlwaysRunTest)),
   );
 
+  it.effect.each([false, true])(
+    "does not use paid timestamps as quota clocks with runtime=%s",
+    (withRuntime) =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const paidAt = "2026-04-10T12:20:00.000Z";
+          const credits = { checkedAt: paidAt, hasCredits: true, unlimited: false };
+          const probeRef = yield* Ref.make<ServerProvider>({
+            ...refreshedSnapshot,
+            usageLimits: { checkedAt: paidAt, windows: [], credits },
+          });
+          const provider = yield* makeManagedServerProvider<TestSettings>({
+            resolveMaintenance: () => Effect.succeed(maintenanceCapabilities),
+            getSettings: Effect.succeed({ enabled: true }),
+            streamSettings: Stream.empty,
+            haveSettingsChanged: (previous, next) => previous.enabled !== next.enabled,
+            initialSnapshot: () => Effect.succeed(initialSnapshot),
+            checkProvider: Ref.get(probeRef),
+            refreshOnInterval: false,
+          });
+          yield* Stream.take(provider.streamChanges, 1).pipe(Stream.runDrain);
+          const window = {
+            id: "primary",
+            kind: "session",
+            label: "Session",
+            usedPercent: 95,
+          } as const;
+          if (withRuntime) {
+            yield* provider.applyUsageLimits({
+              checkedAt: "2026-04-10T12:05:00.000Z",
+              windows: [window],
+            });
+            assert.deepStrictEqual((yield* provider.getSnapshot).usageLimits?.windows, [window]);
+          }
+          yield* Ref.set(probeRef, {
+            ...refreshedSnapshot,
+            usageLimits: {
+              checkedAt: "2026-04-10T12:06:00.000Z",
+              windows: [{ ...window, usedPercent: 20 }],
+            },
+          });
+          const refreshed = yield* provider.refresh;
+          assert.strictEqual(refreshed.usageLimits?.windows[0]?.usedPercent, 20);
+          assert.deepStrictEqual(refreshed.usageLimits?.credits, credits);
+        }),
+      ).pipe(Effect.provide(layerAlwaysRunTest)),
+  );
+
+  it.effect.each([false, true])(
+    "keeps silent quota confirmations and separate paid clocks with stale runtime=%s",
+    (staleRuntime) =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const quotaAt = "2026-04-10T12:05:00.000Z";
+          const confirmedAt = "2026-04-10T12:10:00.000Z";
+          const credits = { checkedAt: quotaAt, hasCredits: true, unlimited: false, balance: "20" };
+          const window = {
+            id: "primary",
+            kind: "session",
+            label: "Session",
+            usedPercent: 95,
+          } as const;
+          const probeRef = yield* Ref.make<ServerProvider>({
+            ...refreshedSnapshot,
+            usageLimits: { checkedAt: quotaAt, windows: [window], credits },
+          });
+          const provider = yield* makeManagedServerProvider<TestSettings>({
+            resolveMaintenance: () => Effect.succeed(maintenanceCapabilities),
+            getSettings: Effect.succeed({ enabled: true }),
+            streamSettings: Stream.empty,
+            haveSettingsChanged: (previous, next) => previous.enabled !== next.enabled,
+            initialSnapshot: () => Effect.succeed(initialSnapshot),
+            checkProvider: Ref.get(probeRef),
+            refreshOnInterval: false,
+          });
+          yield* Stream.take(provider.streamChanges, 1).pipe(Stream.runDrain);
+          const original = yield* provider.getSnapshot;
+          const nextPublished = yield* Stream.take(provider.streamChanges, 1).pipe(
+            Stream.runCollect,
+            Effect.forkChild,
+          );
+          yield* Effect.yieldNow;
+          for (const checkedAt of [confirmedAt, "2026-04-10T12:09:00.000Z"]) {
+            yield* provider.applyUsageLimits({ checkedAt, windows: [window] });
+          }
+          assert.strictEqual(yield* provider.getSnapshot, original);
+          yield* provider.applyUsageLimits({
+            checkedAt: "2026-04-10T12:09:00.000Z",
+            windows: staleRuntime ? [{ ...window, usedPercent: 20 }] : [],
+            credits: { ...credits, checkedAt: "2026-04-10T12:11:00.000Z", balance: "10" },
+          });
+          const [paidUpdate] = Array.from(yield* Fiber.join(nextPublished));
+          assert.deepStrictEqual(paidUpdate?.usageLimits?.windows, [window]);
+          assert.strictEqual(paidUpdate?.usageLimits?.checkedAt, quotaAt);
+          assert.strictEqual(paidUpdate?.usageLimits?.credits?.balance, "10");
+          yield* Ref.set(probeRef, {
+            ...refreshedSnapshot,
+            usageLimits: {
+              checkedAt: "2026-04-10T12:09:30.000Z",
+              windows: [{ ...window, usedPercent: 20 }],
+              credits,
+            },
+          });
+          const reconciled = yield* provider.refresh;
+          assert.deepStrictEqual(reconciled.usageLimits?.windows, [window]);
+          assert.strictEqual(reconciled.usageLimits?.checkedAt, confirmedAt);
+          assert.strictEqual(
+            reconciled.usageLimits?.credits?.checkedAt,
+            "2026-04-10T12:11:00.000Z",
+          );
+          yield* Ref.set(probeRef, {
+            ...refreshedSnapshot,
+            usageLimits: {
+              checkedAt: "2026-04-10T12:10:30.000Z",
+              windows: [{ ...window, usedPercent: 0 }],
+              credits,
+            },
+          });
+          assert.strictEqual((yield* provider.refresh).usageLimits?.windows[0]?.usedPercent, 0);
+        }),
+      ).pipe(Effect.provide(layerAlwaysRunTest)),
+  );
+
+  it.effect.each([false, true])(
+    "discards previous paid usage after a same-email workspace switch with failed=%s",
+    (failed) =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const checkedAt = "2026-04-10T12:05:00.000Z";
+          const oldSnapshot: ServerProvider = {
+            ...refreshedSnapshot,
+            auth: { status: "authenticated", email: "same@example.com", workspaceId: "org-a" },
+            usageLimits: {
+              checkedAt,
+              windows: [{ id: "primary", kind: "session", label: "Session", usedPercent: 95 }],
+              extraUsage: { checkedAt, enabled: true, available: true, coversModelLimits: true },
+              credits: { checkedAt, hasCredits: true, unlimited: false },
+            },
+          };
+          const probeRef = yield* Ref.make(oldSnapshot);
+          const provider = yield* makeManagedServerProvider<TestSettings>({
+            resolveMaintenance: () => Effect.succeed(maintenanceCapabilities),
+            getSettings: Effect.succeed({ enabled: true }),
+            streamSettings: Stream.empty,
+            haveSettingsChanged: (previous, next) => previous.enabled !== next.enabled,
+            initialSnapshot: () => Effect.succeed(initialSnapshot),
+            checkProvider: Ref.get(probeRef),
+            refreshOnInterval: false,
+          });
+          yield* Stream.take(provider.streamChanges, 1).pipe(Stream.runDrain);
+          yield* provider.applyUsageLimits({
+            checkedAt: "2026-04-10T12:10:00.000Z",
+            windows: oldSnapshot.usageLimits!.windows,
+          });
+          const next: ServerProvider = {
+            ...oldSnapshot,
+            auth: { ...oldSnapshot.auth, workspaceId: "org-b" },
+            usageLimits: failed
+              ? {
+                  checkedAt: "2026-04-10T12:20:00.000Z",
+                  windows: [],
+                  unavailable: { reason: "probeFailed" },
+                }
+              : {
+                  checkedAt,
+                  windows: [{ id: "primary", kind: "session", label: "Session", usedPercent: 20 }],
+                },
+          };
+          yield* Ref.set(probeRef, next);
+          const switched = yield* provider.refresh;
+          assert.deepStrictEqual(switched.usageLimits, next.usageLimits);
+          assert.strictEqual(switched.auth.workspaceId, "org-b");
+          yield* provider.applyUsageLimits({
+            checkedAt: "2026-04-10T12:06:00.000Z",
+            windows: [{ id: "primary", kind: "session", label: "Session", usedPercent: 30 }],
+          });
+          assert.strictEqual(
+            (yield* provider.getSnapshot).usageLimits?.windows[0]?.usedPercent,
+            30,
+          );
+        }),
+      ).pipe(Effect.provide(layerAlwaysRunTest)),
+  );
+
   it.effect("keeps live usage windows across a failed probe and a stale enrichment", () =>
     Effect.scoped(
       Effect.gen(function* () {

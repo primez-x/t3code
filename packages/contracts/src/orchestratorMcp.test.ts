@@ -53,6 +53,7 @@ describe("orchestrator MCP contracts", () => {
       hasPendingChildRuns: false,
       providerInstanceId: "claudeAgent",
       model: "claude-sonnet-4-6",
+      options: [{ id: "effort", value: "high" }],
       summary: "Workspace inspected.",
       resultContextTransferId: "context-transfer-result-1",
       latestTerminalRunId: "run-child-1",
@@ -66,6 +67,7 @@ describe("orchestrator MCP contracts", () => {
     expect(request.target?.providerInstanceId).toBe("claudeAgent");
     expect(result.status).toBe("completed");
     expect(result.summary).toBe("Workspace inspected.");
+    expect(result).toHaveProperty("options", [{ id: "effort", value: "high" }]);
   });
 
   it("decodes target model options in canonical and shorthand shapes", () => {
@@ -91,6 +93,15 @@ describe("orchestrator MCP contracts", () => {
       { id: "reasoning", value: "low" },
       { id: "fastMode", value: true },
     ]);
+    for (const options of [[], {}]) {
+      expect(
+        decodeDelegateTaskInput({ task: "Say hello.", target: { options } }).target?.options,
+      ).toEqual([]);
+      expect(
+        decodeCreateThreadsInput({ threads: [{ target: { options } }] }).threads[0]?.target
+          ?.options,
+      ).toEqual([]);
+    }
   });
 
   it("rejects target model options that are not strings or booleans", () => {
@@ -212,6 +223,10 @@ describe("delegation policy MCP contracts", () => {
       },
     };
     expect(decode(input)).not.toHaveProperty("delegationPolicy");
+    expect(decode(input)).not.toHaveProperty("inheritedOptions");
+    expect(
+      decode({ ...input, inheritedOptions: [{ id: "serviceTier", value: "priority" }] }),
+    ).toHaveProperty("inheritedOptions", [{ id: "serviceTier", value: "priority" }]);
     expect(decode({ ...input, delegationPolicy: { version: 1 } }).delegationPolicy).toMatchObject({
       version: 1,
       mode: "native-preferred",

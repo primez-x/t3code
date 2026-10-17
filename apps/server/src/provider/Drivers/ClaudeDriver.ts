@@ -185,28 +185,26 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv, Path.
         modelCatalog,
       );
 
-      // Per-instance capabilities cache: keyed on binary + resolved HOME so
-      // account-specific probes never share auth metadata across instances.
-      const capabilitiesProbeCache = yield* Cache.make({
-        capacity: 1,
-        timeToLive: CAPABILITIES_PROBE_TTL,
-        lookup: () =>
-          Effect.all([
-            probeClaudeCapabilities(effectiveConfig, processEnv, stateDir),
-            ClaudeResetCredits.readClaudeOrganizationId(accountConfigPath),
-          ]).pipe(
-            Effect.map(([capabilities, workspaceId]) =>
-              capabilities && workspaceId ? { ...capabilities, workspaceId } : capabilities,
-            ),
-            Effect.provideService(FileSystem.FileSystem, fileSystem),
-            Effect.provideService(Path.Path, path),
-          ),
-      });
       const capabilitiesCacheKey = yield* makeClaudeCapabilitiesCacheKey(
         effectiveConfig,
         stateDir,
         processEnv,
       );
+      const capabilitiesProbeCache = yield* Cache.make({
+        capacity: 1,
+        timeToLive: CAPABILITIES_PROBE_TTL,
+        lookup: (key: string) =>
+          probeClaudeCapabilities(effectiveConfig, processEnv, stateDir).pipe(
+            // Account metadata can change between the cache lookup and SDK startup.
+            Effect.map((capabilities) =>
+              capabilities && key === `${capabilitiesCacheKey}\0${capabilities.workspaceId ?? ""}`
+                ? capabilities
+                : undefined,
+            ),
+            Effect.provideService(FileSystem.FileSystem, fileSystem),
+            Effect.provideService(Path.Path, path),
+          ),
+      });
 
       const checkProvider = catalogService.refreshInBackground.pipe(
         Effect.andThen(
@@ -214,7 +212,16 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv, Path.
             Effect.flatMap((catalog) =>
               checkClaudeProviderStatus(
                 effectiveConfig,
-                () => Cache.get(capabilitiesProbeCache, capabilitiesCacheKey),
+                () =>
+                  ClaudeResetCredits.readClaudeOrganizationId(accountConfigPath).pipe(
+                    Effect.flatMap((workspaceId) =>
+                      Cache.get(
+                        capabilitiesProbeCache,
+                        `${capabilitiesCacheKey}\0${workspaceId ?? ""}`,
+                      ),
+                    ),
+                    Effect.provideService(FileSystem.FileSystem, fileSystem),
+                  ),
                 processEnv,
                 stateDir,
                 catalog,

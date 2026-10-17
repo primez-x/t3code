@@ -44,6 +44,7 @@ import {
   claudeUsageResponseToLimits,
   recordClaudeUsageResponse,
 } from "./claudeUsageLimits.ts";
+import { claudeAccountConfigPath, readClaudeOrganizationId } from "./claudeResetCredits.ts";
 import {
   BUNDLED_CLAUDE_MODEL_CATALOG,
   type ClaudeModelCatalog,
@@ -357,6 +358,9 @@ const probeClaudeCapabilities = (
       claudeEnvironment,
     );
     const managedMcpConfig = yield* hasClaudeManagedMcpConfig();
+    const workspaceId = yield* readClaudeOrganizationId(
+      yield* claudeAccountConfigPath(claudeEnvironment.CLAUDE_CONFIG_DIR?.trim() || undefined),
+    );
     return yield* Effect.tryPromise(async () => {
       const q = claudeQuery({
         // Never yield — we only need initialization data, not a conversation.
@@ -374,11 +378,11 @@ const probeClaudeCapabilities = (
         }),
       });
       const init = await q.initializationResult();
-      return { q, init };
+      return { q, init, workspaceId };
     });
   }).pipe(
     Effect.timeout(CAPABILITIES_PROBE_TIMEOUT_MS),
-    Effect.flatMap(({ q, init }) =>
+    Effect.flatMap(({ q, init, workspaceId }) =>
       Effect.gen(function* () {
         // Usage has its own deadline so a slow optional request cannot discard initialization.
         // Only the rate limits are read, so skip the local transcript scan that fills
@@ -407,6 +411,7 @@ const probeClaudeCapabilities = (
           | undefined;
         return {
           email: account?.email,
+          ...(workspaceId ? { workspaceId } : {}),
           subscriptionType: account?.subscriptionType,
           tokenSource: account?.tokenSource,
           apiKeySource: account?.apiKeySource,
@@ -589,6 +594,10 @@ export const checkClaudeProviderStatus = Effect.fn("checkClaudeProviderStatus")(
   const dedupedSlashCommands = dedupeSlashCommands(slashCommands);
 
   if (!capabilities) {
+    const claudeEnvironment = yield* makeClaudeEnvironment(claudeSettings, resolvedEnvironment);
+    const workspaceId = yield* readClaudeOrganizationId(
+      yield* claudeAccountConfigPath(claudeEnvironment.CLAUDE_CONFIG_DIR?.trim() || undefined),
+    );
     return buildServerProvider({
       presentation: CLAUDE_PRESENTATION,
       enabled: claudeSettings.enabled,
@@ -601,7 +610,7 @@ export const checkClaudeProviderStatus = Effect.fn("checkClaudeProviderStatus")(
         installed: true,
         version: parsedVersion,
         status: "warning",
-        auth: { status: "unknown" },
+        auth: { status: "unknown", ...(workspaceId ? { workspaceId } : {}) },
         message: "Could not verify Claude authentication status from initialization result.",
       },
     });

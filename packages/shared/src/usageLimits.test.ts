@@ -63,7 +63,7 @@ it("keeps paid credits from the newest credit observation across duplicate accou
     balance: "50",
   };
   const native = provider({
-    auth: { status: "authenticated", email: "same@example.com" },
+    auth: { status: "authenticated", email: "same@example.com", workspaceId: "org-a" },
     usageLimits: { checkedAt: credits.checkedAt, windows: [window], credits },
   });
   const other = {
@@ -106,7 +106,7 @@ it("keeps extra usage from the newest paid observation across duplicate accounts
     coversModelLimits: true,
   };
   const native = provider({
-    auth: { status: "authenticated", email: "same@example.com" },
+    auth: { status: "authenticated", email: "same@example.com", workspaceId: "org-a" },
     usageLimits: { checkedAt: extraUsage.checkedAt, windows: [window], extraUsage },
   });
   const other = {
@@ -373,7 +373,7 @@ describe("pools", () => {
     const native = provider({
       driver: claude,
       instanceId: ProviderInstanceId.make("claude"),
-      auth: { status: "authenticated", email: "same@example.com" },
+      auth: { status: "authenticated", email: "same@example.com", workspaceId: "org-a" },
       usageLimits: {
         checkedAt,
         windows: [{ ...window, usedPercent: 40 }],
@@ -395,6 +395,7 @@ describe("pools", () => {
                     id: "claude-same@example.com.json",
                     driver: claude,
                     email: "same@example.com",
+                    workspaceId: "org-a",
                     usageLimits: {
                       checkedAt: "2026-09-03T11:30:00.000Z",
                       windows: [{ ...window, usedPercent: 55 }],
@@ -418,7 +419,7 @@ describe("pools", () => {
     const native = provider({
       driver: claude,
       instanceId: ProviderInstanceId.make("claude"),
-      auth: { status: "authenticated", email: "same@example.com" },
+      auth: { status: "authenticated", email: "same@example.com", workspaceId: "org-a" },
       usageLimits: {
         checkedAt: "2026-09-03T11:30:00.000Z",
         windows: [{ ...window, usedPercent: 40 }],
@@ -440,6 +441,7 @@ describe("pools", () => {
                     id: "claude-same@example.com.json",
                     driver: claude,
                     email: "same@example.com",
+                    workspaceId: "org-a",
                     usageLimits: {
                       checkedAt,
                       windows: [{ ...window, usedPercent: 55 }],
@@ -463,7 +465,7 @@ describe("pools", () => {
 
   it("redeems on the environment whose snapshot supplied the credits on show", () => {
     const stale = provider({
-      auth: { status: "authenticated", email: "same@example.com" },
+      auth: { status: "authenticated", email: "same@example.com", workspaceId: "org-a" },
       usageLimits: {
         checkedAt,
         windows: [window],
@@ -492,13 +494,14 @@ describe("pools", () => {
 
   it("uses the freshest hub credit and its environment even when the account is also native", () => {
     const native = provider({
-      auth: { status: "authenticated", email: "same@example.com" },
+      auth: { status: "authenticated", email: "same@example.com", workspaceId: "org-a" },
       usageLimits: { checkedAt, windows: [window], resetCredits: { availableCount: 1 } },
     });
     const hubAccount = {
       id: "codex-same.json",
       driver: native.driver,
       email: "same@example.com",
+      workspaceId: "org-a",
       usageLimits: {
         checkedAt: "2026-09-03T11:30:00.000Z",
         windows: [window],
@@ -577,7 +580,7 @@ describe("pools", () => {
           serverConfig: {
             providers: [
               provider({
-                auth: { status: "authenticated", email: "same@example.com" },
+                auth: { status: "authenticated", email: "same@example.com", workspaceId: "org-a" },
                 usageLimits,
               }),
             ],
@@ -630,7 +633,7 @@ describe("pools", () => {
     expect(accounts.map((account) => account.key)).toEqual([
       "env-a:business",
       "env-a:personal",
-      "hub:x.json",
+      "env-a:hub:x.json",
     ]);
     expect(accounts[0]?.limits.windows[0]?.usedPercent).toBe(8);
     const withoutEmail = (id: string, workspaceId: string) => {
@@ -665,6 +668,214 @@ describe("pools", () => {
       "Laptop",
       "Desktop",
     ]);
+  });
+
+  it.each(["claudeAgent", "codex"] as const)(
+    "keeps unidentified same-email %s hub credentials separate in pooled and per-provider limits",
+    (driver) => {
+      for (const workspaceId of ["org-a", undefined]) {
+        const native = provider({
+          driver: ProviderDriverKind.make(driver),
+          auth: { status: "authenticated", email: "same@example.com", workspaceId },
+          ...(workspaceId ? { usageLimits: { checkedAt, windows: [window] } } : {}),
+        });
+        const hub = {
+          ...source,
+          accounts: [
+            {
+              id: "first.json",
+              driver: native.driver,
+              email: " SAME@example.com ",
+              ...(workspaceId ? { workspaceId } : {}),
+              usageLimits: { checkedAt, windows: [{ ...window, usedPercent: 20 }] },
+            },
+            {
+              id: "second.json",
+              driver: native.driver,
+              email: "same@example.com",
+              usageLimits: { checkedAt, windows: [{ ...window, usedPercent: 80 }] },
+            },
+          ],
+        };
+        const input = new Map([
+          [
+            EnvironmentId.make("env-a"),
+            { ...laptop, serverConfig: { providers: [native], usageLimitSources: [hub] } },
+          ],
+        ]);
+        const accounts = collectLimitAccounts(input);
+        expect(accounts).toHaveLength(2);
+        expect(accounts[1]?.key).toBe("hub:second.json");
+        expect(accounts[1]?.limits.windows[0]?.usedPercent).toBe(80);
+        expect(accounts[0]?.key).toBe(workspaceId ? "env-a:codex" : "hub:first.json");
+        const report = collectProviderUsageLimits(native.instanceId, [native], [hub], now);
+        expect(report?.accounts.map((account) => account.id)).toEqual([
+          workspaceId ? "codex" : "hub:first.json",
+          "hub:second.json",
+        ]);
+      }
+    },
+  );
+
+  it("merges an unidentified native report with hub credentials that agree on their workspace", () => {
+    const native = provider({
+      driver: claude,
+      auth: { status: "authenticated", email: "same@example.com" },
+      usageLimits: { checkedAt, windows: [window] },
+    });
+    const hub = {
+      ...source,
+      accounts: ["first.json", "second.json"].map((id) => ({
+        id,
+        driver: claude,
+        email: "same@example.com",
+        workspaceId: "org-a",
+        usageLimits: { checkedAt, windows: [window] },
+      })),
+    };
+    const input = new Map([
+      [
+        EnvironmentId.make("env-a"),
+        { ...laptop, serverConfig: { providers: [native], usageLimitSources: [hub] } },
+      ],
+    ]);
+    expect(collectLimitAccounts(input).map((account) => account.key)).toEqual(["env-a:codex"]);
+    expect(
+      collectProviderUsageLimits(native.instanceId, [native], [hub], now)?.accounts,
+    ).toHaveLength(1);
+  });
+
+  describe.each(["claudeAgent", "codex"] as const)("%s account identity", (driver) => {
+    const layouts = [
+      { left: "hub", right: "hub", separateEnvironments: false },
+      { left: "hub", right: "hub", separateEnvironments: true },
+      { left: "native", right: "hub", separateEnvironments: false },
+      { left: "native", right: "hub", separateEnvironments: true },
+      { left: "hub", right: "native", separateEnvironments: false },
+      { left: "native", right: "native", separateEnvironments: true },
+    ] as const;
+
+    describe.each(layouts)("$left/$right across environments=$separateEnvironments", (layout) => {
+      const collect = (leftWorkspace: string | undefined, rightWorkspace: string | undefined) => {
+        const paid = {
+          credits: {
+            checkedAt: "2026-09-03T11:50:00.000Z",
+            hasCredits: true,
+            unlimited: false,
+            balance: "50",
+          },
+          extraUsage: {
+            checkedAt: "2026-09-03T11:50:00.000Z",
+            enabled: true,
+            available: true,
+            coversModelLimits: true,
+          },
+          resetCredits: { availableCount: 1, nextCreditId: "paid-credit" },
+        };
+        const known = {
+          id: "same.json",
+          driver: ProviderDriverKind.make(driver),
+          email: " SAME@example.com ",
+          workspaceId: leftWorkspace,
+          usageLimits: {
+            checkedAt: "2026-09-03T12:00:00.000Z",
+            windows: [{ ...window, usedPercent: 80 }],
+          },
+        };
+        const unknown = {
+          ...known,
+          email: "same@example.com",
+          workspaceId: rightWorkspace,
+          usageLimits: {
+            checkedAt,
+            windows: [{ ...window, usedPercent: 20 }],
+            ...paid,
+          },
+        };
+        const config = (side: "native" | "hub", account: typeof known, hubId: string) => ({
+          providers:
+            side === "native"
+              ? [
+                  provider({
+                    driver: account.driver,
+                    auth: {
+                      status: "authenticated",
+                      email: account.email,
+                      workspaceId: account.workspaceId,
+                    },
+                    usageLimits: account.usageLimits,
+                  }),
+                ]
+              : [],
+          usageLimitSources:
+            side === "hub"
+              ? [{ ...source, id: UsageLimitSourceId.make(hubId), accounts: [account] }]
+              : [],
+        });
+        const left = config(layout.left, known, "hub-a");
+        const right = config(
+          layout.right,
+          unknown,
+          layout.separateEnvironments ? "hub-a" : "hub-b",
+        );
+        const presentations = new Map([
+          [EnvironmentId.make("env-a"), { ...laptop, serverConfig: left }],
+        ]);
+        if (layout.separateEnvironments) {
+          presentations.set(EnvironmentId.make("env-b"), { ...laptop, serverConfig: right });
+        } else {
+          left.providers.push(...right.providers);
+          left.usageLimitSources.push(...right.usageLimitSources);
+        }
+        const pooled = collectLimitAccounts(presentations);
+        const providers = [
+          ...left.providers,
+          ...(layout.separateEnvironments ? right.providers : []),
+        ];
+        const sources = [
+          ...left.usageLimitSources,
+          ...(layout.separateEnvironments ? right.usageLimitSources : []),
+        ];
+        const selected = providers[0] ?? provider({ driver: known.driver });
+        const report = collectProviderUsageLimits(
+          selected.instanceId,
+          providers.length > 0 ? providers : [selected],
+          sources,
+          now,
+        );
+        return { pooled, report, paid };
+      };
+
+      it.each(["org-a", undefined])(
+        "keeps quotas and paid observations separate from an unknown workspace beside %s",
+        (workspaceId) => {
+          const { pooled, report, paid } = collect(workspaceId, undefined);
+          expect(pooled).toHaveLength(2);
+          expect(new Set(pooled.map((account) => account.key)).size).toBe(2);
+          const unpaid = pooled.find((account) => account.limits.windows[0]?.usedPercent === 80);
+          const paidAccount = pooled.find(
+            (account) => account.limits.windows[0]?.usedPercent === 20,
+          );
+          expect(unpaid).toBeDefined();
+          expect(unpaid?.limits.credits).toBeUndefined();
+          expect(unpaid?.limits.extraUsage).toBeUndefined();
+          expect(unpaid?.limits.resetCredits).toBeUndefined();
+          expect(paidAccount?.limits).toMatchObject(paid);
+          expect(report?.accounts).toHaveLength(2);
+          const nativeQuota = report?.accounts.find(
+            (account) => account.limits.windows[0]?.usedPercent === 80,
+          );
+          expect(nativeQuota?.limits.resetCredits).toBeUndefined();
+        },
+      );
+
+      it("merges verified organization duplicates and preserves independent paid clocks", () => {
+        const { pooled, paid } = collect("org-a", "org-a");
+        expect(pooled).toHaveLength(1);
+        expect(pooled[0]?.limits.windows[0]?.usedPercent).toBe(80);
+        expect(pooled[0]?.limits).toMatchObject(paid);
+      });
+    });
   });
 
   it("joins a report without a workspace to the only workspace signed in with its email", () => {
@@ -1108,7 +1319,7 @@ describe("/usage-limits", () => {
   const limits = { checkedAt: "2026-09-03T11:00:00.000Z", windows: [window] };
   const selected = provider({
     usageLimits: limits,
-    auth: { status: "authenticated", email: "same@example.com" },
+    auth: { status: "authenticated", email: "same@example.com", workspaceId: "org-a" },
   });
   const sources = [
     {
@@ -1121,6 +1332,7 @@ describe("/usage-limits", () => {
           id: "duplicate",
           driver: selected.driver,
           email: "SAME@example.com",
+          workspaceId: "org-a",
           usageLimits: limits,
         },
         { id: "oss", driver: selected.driver, plan: "Codex OSS", usageLimits: limits },
@@ -1190,7 +1402,7 @@ describe("/usage-limits", () => {
         windows: [window],
         resetCredits: { availableCount: 3, nextCreditId: "native-credit" },
       },
-      auth: { status: "authenticated", email: "same@example.com" },
+      auth: { status: "authenticated", email: "same@example.com", workspaceId: "org-a" },
     });
     const stale = [
       {
@@ -1203,6 +1415,7 @@ describe("/usage-limits", () => {
             id: "duplicate",
             driver: fresher.driver,
             email: "SAME@example.com",
+            workspaceId: "org-a",
             usageLimits: {
               ...limits,
               resetCredits: { availableCount: 2, nextCreditId: "hub-credit" },

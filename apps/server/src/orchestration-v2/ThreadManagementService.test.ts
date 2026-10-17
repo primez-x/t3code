@@ -2442,6 +2442,520 @@ it.effect(
   },
 );
 
+it.effect.each(
+  (["t3-managed", "native-preferred"] as const).flatMap((mode) =>
+    (["driver", "instance", "model"] as const).flatMap((target) =>
+      [false, true].map((emptyCatalog) => ({ mode, target, emptyCatalog })),
+    ),
+  ),
+)(
+  "cached target health recovers for $mode $target requests with emptyCatalog=$emptyCatalog before fallback",
+  ({ mode, target, emptyCatalog }) => {
+    const commands: Array<OrchestrationV2Command> = [];
+    const refreshed: Array<ProviderInstanceId> = [];
+    const failed = {
+      ...delegationProvider,
+      status: "error" as const,
+      models: emptyCatalog ? [] : delegationProvider.models,
+    };
+    const unrelated = {
+      ...failed,
+      instanceId: ProviderInstanceId.make("claude_unrequested"),
+      driver: ProviderDriverKind.make("claudeAgent"),
+    };
+    const providers = [failed, unrelated];
+    return Effect.gen(function* () {
+      const threads = yield* ThreadManagementService.ThreadManagementService;
+      yield* threads.dispatch({
+        ...delegationCommand(),
+        delegationTargetExplicit: target === "model",
+        ...(target === "model"
+          ? {}
+          : {
+              delegationProviderConstraint:
+                target === "driver" ? { driver: failed.driver } : { instanceId: failed.instanceId },
+            }),
+        modelSelection: { instanceId: failed.instanceId, model: "gpt-6.1-sol" },
+      });
+      expect(refreshed).toEqual([failed.instanceId]);
+      expect(commands[0]).toMatchObject({
+        modelSelection: { instanceId: failed.instanceId, model: "gpt-6.1-sol" },
+        routingDecision: { reason: "explicit-target" },
+      });
+    }).pipe(
+      Effect.provide(
+        layerDelegationTest(
+          commands,
+          providers,
+          true,
+          mode,
+          undefined,
+          providers.map((provider) => provider.instanceId),
+          new Map(),
+          [],
+          {},
+          (instanceId) =>
+            Effect.sync(() => {
+              refreshed.push(instanceId);
+              return [delegationProvider, unrelated];
+            }),
+          undefined,
+          false,
+          { allowFallback: true },
+        ),
+      ),
+    );
+  },
+);
+
+it.effect.each([false, true])(
+  "cached target health continued failure obeys allowFallback=%s after one probe",
+  (allowFallback) => {
+    const commands: Array<OrchestrationV2Command> = [];
+    const refreshed: Array<ProviderInstanceId> = [];
+    const failed = { ...delegationProvider, status: "error" as const };
+    const alternate = {
+      ...delegationProvider,
+      instanceId: ProviderInstanceId.make("claude_fallback"),
+      driver: ProviderDriverKind.make("claudeAgent"),
+      usageLimits: { checkedAt: "1970-01-01T00:00:00Z", windows: [] },
+    };
+    const providers = [failed, alternate];
+    const routes: ReadonlyArray<DelegationModelRoute> = providers.map((provider) => ({
+      driver: provider.driver,
+      model: "gpt-6.1-sol",
+      effort: "high",
+      capabilities: ["coding"],
+      costPerTask: 1,
+    }));
+    return Effect.gen(function* () {
+      const threads = yield* ThreadManagementService.ThreadManagementService;
+      const request = threads.dispatch({
+        ...delegationCommand(),
+        delegationProviderConstraint: { driver: failed.driver },
+      });
+      if (allowFallback) {
+        yield* request;
+        expect(commands[0]).toMatchObject({
+          modelSelection: { instanceId: alternate.instanceId },
+          routingDecision: { substitution: { requestedDriver: failed.driver } },
+        });
+      } else {
+        const error = yield* request.pipe(Effect.flip);
+        expect(error).toMatchObject({
+          cause: {
+            _tag: "DelegationSelectionError",
+            unavailableReason: "provider-unavailable",
+          },
+        });
+        expect(commands).toEqual([]);
+      }
+      expect(refreshed).toEqual([failed.instanceId]);
+    }).pipe(
+      Effect.provide(
+        layerDelegationTest(
+          commands,
+          providers,
+          true,
+          "t3-managed",
+          routes,
+          providers.map((provider) => provider.instanceId),
+          new Map(),
+          [],
+          {},
+          (instanceId) =>
+            Effect.sync(() => {
+              refreshed.push(instanceId);
+              return providers;
+            }),
+          undefined,
+          false,
+          { allowFallback },
+        ),
+      ),
+    );
+  },
+);
+
+it.effect.each([
+  "disabled",
+  "project-disabled",
+  "not-installed",
+  "unregistered",
+  "unsupported",
+] as const)("cached target health never probes a %s target", (reason) => {
+  const commands: Array<OrchestrationV2Command> = [];
+  const refreshed: Array<ProviderInstanceId> = [];
+  const provider = {
+    ...delegationProvider,
+    status: "error" as const,
+    enabled: reason !== "disabled",
+    installed: reason !== "not-installed",
+    driver: ProviderDriverKind.make(reason === "unsupported" ? "custom" : "codex"),
+  };
+  const routes: ReadonlyArray<DelegationModelRoute> = [
+    {
+      driver: provider.driver,
+      model: "gpt-6.1-sol",
+      effort: "high",
+      capabilities: ["coding"],
+      costPerTask: 1,
+    },
+  ];
+  return Effect.gen(function* () {
+    const threads = yield* ThreadManagementService.ThreadManagementService;
+    yield* threads
+      .dispatch({
+        ...delegationCommand(),
+        delegationProviderConstraint: { instanceId: provider.instanceId },
+      })
+      .pipe(Effect.flip);
+    expect(refreshed).toEqual([]);
+    expect(commands).toEqual([]);
+  }).pipe(
+    Effect.provide(
+      layerDelegationTest(
+        commands,
+        [provider],
+        reason !== "project-disabled",
+        "t3-managed",
+        routes,
+        reason === "unregistered" ? [] : [provider.instanceId],
+        new Map(),
+        [],
+        {},
+        (instanceId) =>
+          Effect.sync(() => {
+            refreshed.push(instanceId);
+            return [delegationProvider];
+          }),
+      ),
+    ),
+  );
+});
+
+it.effect("cached target health skips a failed peer when a healthy fresh target can serve", () => {
+  const commands: Array<OrchestrationV2Command> = [];
+  const refreshed: Array<ProviderInstanceId> = [];
+  const healthy = {
+    ...delegationProvider,
+    usageLimits: { checkedAt: "1970-01-01T00:00:00Z", windows: [] },
+  };
+  const failed = {
+    ...healthy,
+    instanceId: ProviderInstanceId.make("codex_failed_peer"),
+    status: "error" as const,
+  };
+  const providers = [healthy, failed];
+  return Effect.gen(function* () {
+    const threads = yield* ThreadManagementService.ThreadManagementService;
+    yield* threads.dispatch({
+      ...delegationCommand(),
+      delegationProviderConstraint: { driver: healthy.driver },
+    });
+    expect(refreshed).toEqual([]);
+    expect(commands[0]).toMatchObject({ modelSelection: { instanceId: healthy.instanceId } });
+  }).pipe(
+    Effect.provide(
+      layerDelegationTest(
+        commands,
+        providers,
+        true,
+        "t3-managed",
+        undefined,
+        providers.map((provider) => provider.instanceId),
+        new Map(),
+        [],
+        {},
+        (instanceId) =>
+          Effect.sync(() => {
+            refreshed.push(instanceId);
+            return providers;
+          }),
+      ),
+    ),
+  );
+});
+
+it.effect(
+  "cached target health recovers after a stale requested peer reports exhausted usage",
+  () => {
+    const commands: Array<OrchestrationV2Command> = [];
+    const refreshed: Array<ProviderInstanceId> = [];
+    const failed = { ...delegationProvider, status: "error" as const };
+    const peer = {
+      ...delegationProvider,
+      instanceId: ProviderInstanceId.make("codex_stale_peer"),
+    };
+    let snapshots = [failed, peer];
+    return Effect.gen(function* () {
+      const threads = yield* ThreadManagementService.ThreadManagementService;
+      yield* threads.dispatch({
+        ...delegationCommand(),
+        delegationProviderConstraint: { driver: failed.driver },
+      });
+      expect(refreshed).toEqual([peer.instanceId, failed.instanceId]);
+      expect(commands[0]).toMatchObject({
+        modelSelection: { instanceId: failed.instanceId },
+        routingDecision: { reason: "explicit-target" },
+      });
+    }).pipe(
+      Effect.provide(
+        layerDelegationTest(
+          commands,
+          snapshots,
+          true,
+          "t3-managed",
+          undefined,
+          snapshots.map((provider) => provider.instanceId),
+          new Map(),
+          [],
+          {},
+          (instanceId) =>
+            Effect.sync(() => {
+              refreshed.push(instanceId);
+              snapshots = snapshots.map((provider) =>
+                provider.instanceId !== instanceId
+                  ? provider
+                  : {
+                      ...provider,
+                      status: "ready" as const,
+                      usageLimits: {
+                        checkedAt: "1970-01-01T00:00:00Z",
+                        windows: [
+                          {
+                            id: "weekly",
+                            label: "Weekly",
+                            kind: "weekly" as const,
+                            usedPercent: instanceId === peer.instanceId ? 100 : 20,
+                            resetsAt: "1970-01-01T01:00:00Z",
+                          },
+                        ],
+                      },
+                    },
+              );
+              return snapshots;
+            }),
+          undefined,
+          false,
+          { allowFallback: false },
+        ),
+      ),
+    );
+  },
+);
+
+it.effect("cached target health replay performs no probes", () => {
+  const commands: Array<OrchestrationV2Command> = [];
+  const refreshed: Array<ProviderInstanceId> = [];
+  const provider = { ...delegationProvider, status: "error" as const };
+  return Effect.gen(function* () {
+    const command = {
+      ...delegationCommand(),
+      delegationProviderConstraint: { driver: provider.driver },
+    };
+    const receipts = yield* CommandReceiptStore.CommandReceiptStoreV2;
+    yield* receipts.insertIfAbsent({
+      commandId: command.commandId,
+      threadId: delegationParentId,
+      commandType: command.type,
+      acceptedAt: yield* DateTime.now,
+      resultSequence: 1,
+      status: "accepted",
+      error: null,
+    });
+    const threads = yield* ThreadManagementService.ThreadManagementService;
+    yield* threads.dispatch(command);
+    expect(commands).toEqual([command]);
+    expect(refreshed).toEqual([]);
+  }).pipe(
+    Effect.provide(
+      layerDelegationTest(
+        commands,
+        [provider],
+        true,
+        "t3-managed",
+        undefined,
+        [provider.instanceId],
+        new Map(),
+        [],
+        {},
+        (instanceId) =>
+          Effect.sync(() => {
+            refreshed.push(instanceId);
+            return [delegationProvider];
+          }),
+      ),
+    ),
+  );
+});
+
+it.effect.each([
+  {
+    scenario: "paid-disabled",
+    allowCredits: false,
+    override: undefined,
+    creditAge: "fresh",
+    usedPercent: 100,
+    reserve: 0,
+    permitted: false,
+  },
+  {
+    scenario: "paid-enabled",
+    allowCredits: true,
+    override: undefined,
+    creditAge: "fresh",
+    usedPercent: 100,
+    reserve: 0,
+    permitted: true,
+  },
+  {
+    scenario: "paid-override-disabled",
+    allowCredits: true,
+    override: false,
+    creditAge: "fresh",
+    usedPercent: 100,
+    reserve: 0,
+    permitted: false,
+  },
+  {
+    scenario: "paid-override-enabled",
+    allowCredits: false,
+    override: true,
+    creditAge: "fresh",
+    usedPercent: 100,
+    reserve: 0,
+    permitted: true,
+  },
+  {
+    scenario: "paid-stale",
+    allowCredits: true,
+    override: undefined,
+    creditAge: "stale",
+    usedPercent: 100,
+    reserve: 0,
+    permitted: false,
+  },
+  {
+    scenario: "reserve",
+    allowCredits: false,
+    override: undefined,
+    creditAge: "fresh",
+    usedPercent: 90,
+    reserve: 15,
+    permitted: false,
+  },
+])("cached target health recovery preserves $scenario policy", (scenario) => {
+  const commands: Array<OrchestrationV2Command> = [];
+  const refreshed: Array<ProviderInstanceId> = [];
+  const failed = { ...delegationProvider, status: "error" as const };
+  const recovered: ServerProvider = {
+    ...delegationProvider,
+    usageLimits: {
+      checkedAt: "1970-01-01T00:10:00Z",
+      windows: [
+        {
+          id: "weekly",
+          label: "Weekly",
+          kind: "weekly",
+          usedPercent: scenario.usedPercent,
+          resetsAt: "1970-01-01T01:00:00Z",
+        },
+      ],
+      credits: {
+        checkedAt: scenario.creditAge === "fresh" ? "1970-01-01T00:10:00Z" : "1970-01-01T00:00:00Z",
+        hasCredits: true,
+        unlimited: false,
+        balance: "50",
+      },
+    },
+  };
+  return Effect.gen(function* () {
+    yield* TestClock.adjust(Duration.minutes(10));
+    const threads = yield* ThreadManagementService.ThreadManagementService;
+    const request = threads.dispatch({
+      ...delegationCommand(),
+      delegationProviderConstraint: { driver: failed.driver },
+    });
+    if (scenario.permitted) {
+      yield* request;
+      expect(commands[0]).toMatchObject({ routingDecision: { usesCredits: true } });
+    } else {
+      yield* request.pipe(Effect.flip);
+      expect(commands).toEqual([]);
+    }
+    expect(refreshed).toEqual([failed.instanceId]);
+  }).pipe(
+    Effect.provide(
+      layerDelegationTest(
+        commands,
+        [failed],
+        true,
+        "t3-managed",
+        undefined,
+        [failed.instanceId],
+        new Map(),
+        [],
+        {},
+        (instanceId) =>
+          Effect.sync(() => {
+            refreshed.push(instanceId);
+            return [recovered];
+          }),
+        undefined,
+        scenario.allowCredits,
+        {
+          allowFallback: false,
+          minimumHeadroomPercent: scenario.reserve,
+          allowCreditsByProvider:
+            scenario.override === undefined ? {} : { [failed.instanceId]: scenario.override },
+        },
+      ),
+    ),
+  );
+});
+
+it.effect.each(["effort", "capability", "advisor"] as const)(
+  "cached target health recovery preserves the %s floor",
+  (floor) => {
+    const commands: Array<OrchestrationV2Command> = [];
+    const refreshed: Array<ProviderInstanceId> = [];
+    const failed = { ...delegationProvider, status: "error" as const };
+    return Effect.gen(function* () {
+      const threads = yield* ThreadManagementService.ThreadManagementService;
+      yield* threads
+        .dispatch({
+          ...delegationCommand(floor === "effort" ? [{ id: "reasoningEffort", value: "max" }] : []),
+          delegationProviderConstraint: { driver: failed.driver },
+          ...(floor === "capability" ? { capability: "architecture" as const } : {}),
+          ...(floor === "advisor" ? { role: "advice" as const } : {}),
+        })
+        .pipe(Effect.flip);
+      expect(commands).toEqual([]);
+      expect(refreshed).toEqual([]);
+    }).pipe(
+      Effect.provide(
+        layerDelegationTest(
+          commands,
+          [failed],
+          true,
+          "t3-managed",
+          undefined,
+          [failed.instanceId],
+          new Map(),
+          [],
+          {},
+          (instanceId) =>
+            Effect.sync(() => {
+              refreshed.push(instanceId);
+              return [delegationProvider];
+            }),
+        ),
+      ),
+    );
+  },
+);
+
 it.effect(
   "delegation probes only stale healthy serving accounts on relevant Codex or Claude drivers",
   () => {

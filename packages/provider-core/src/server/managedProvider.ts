@@ -22,6 +22,7 @@ import type { ManagedServerProvider } from "./snapshot.ts";
 interface ProviderSnapshotState {
   readonly snapshot: ServerProvider;
   readonly enrichmentGeneration: number;
+  readonly usageLimitsCheckedAt: string | undefined;
 }
 
 function withUsageLimits(
@@ -69,6 +70,10 @@ export const makeManagedServerProvider = Effect.fn("makeManagedServerProvider")(
   const snapshotStateRef = yield* Ref.make<ProviderSnapshotState>({
     snapshot: initialSnapshot,
     enrichmentGeneration: 0,
+    usageLimitsCheckedAt:
+      initialSnapshot.usageLimits?.windows.length && !initialSnapshot.usageLimits.unavailable
+        ? initialSnapshot.usageLimits.checkedAt
+        : undefined,
   });
   const settingsRef = yield* Ref.make(initialSettings);
   const enrichmentFiberRef = yield* Ref.make<Fiber.Fiber<void, unknown> | null>(null);
@@ -169,6 +174,7 @@ export const makeManagedServerProvider = Effect.fn("makeManagedServerProvider")(
           : resolveUsageLimitsAfterProbe({
               published: state.snapshot.usageLimits,
               probed: probedSnapshot.usageLimits,
+              publishedCheckedAt: state.usageLimitsCheckedAt,
             });
         const workspaceId =
           usageLimits === probedSnapshot.usageLimits ? undefined : state.snapshot.auth.workspaceId;
@@ -180,7 +186,16 @@ export const makeManagedServerProvider = Effect.fn("makeManagedServerProvider")(
         );
         return [
           { snapshot, generation },
-          { snapshot, enrichmentGeneration: generation },
+          {
+            snapshot,
+            enrichmentGeneration: generation,
+            usageLimitsCheckedAt:
+              !usageLimits?.windows.length || usageLimits.unavailable
+                ? undefined
+                : !switchedAccount && usageLimits === state.snapshot.usageLimits
+                  ? state.usageLimitsCheckedAt
+                  : usageLimits?.checkedAt,
+          },
         ] as const;
       },
     );
@@ -199,12 +214,26 @@ export const makeManagedServerProvider = Effect.fn("makeManagedServerProvider")(
           previous: state.snapshot.usageLimits,
           update,
           checkedAt: update.checkedAt,
+          previousCheckedAt: state.usageLimitsCheckedAt,
         });
+        // Equal token updates confirm quota freshness without publishing another snapshot.
+        const usageLimitsCheckedAt =
+          update.windows.length > 0 &&
+          usageLimits?.unavailable === undefined &&
+          (state.usageLimitsCheckedAt === undefined ||
+            Date.parse(update.checkedAt) >= Date.parse(state.usageLimitsCheckedAt))
+            ? update.checkedAt
+            : state.usageLimitsCheckedAt;
         if (usageLimits === state.snapshot.usageLimits) {
-          return [null, state] as const;
+          return [
+            null,
+            usageLimitsCheckedAt === state.usageLimitsCheckedAt
+              ? state
+              : { ...state, usageLimitsCheckedAt },
+          ] as const;
         }
         const snapshot = withUsageLimits(state.snapshot, usageLimits);
-        return [snapshot, { ...state, snapshot }] as const;
+        return [snapshot, { ...state, snapshot, usageLimitsCheckedAt }] as const;
       });
       if (snapshotToPublish !== null) {
         yield* PubSub.publish(changesPubSub, snapshotToPublish);

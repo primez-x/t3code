@@ -37,6 +37,7 @@ import {
   resolveProjectProviderInstanceEnabled,
   RunId,
   type ScheduledTaskId,
+  type ServerProvider,
   ThreadId,
   type TurnItemId,
 } from "@t3tools/contracts";
@@ -807,6 +808,51 @@ const make = Effect.gen(function* () {
       const staleCheckMs = yield* Clock.currentTimeMillis;
       const servingInstances = yield* providerAdapters.list();
       let providers = yield* providerRegistry.getProviders;
+      const explicit =
+        command.delegationTargetExplicit === true ||
+        command.delegationProviderConstraint !== undefined;
+      const requestedTarget = !explicit
+        ? undefined
+        : command.delegationTargetExplicit
+          ? command.delegationProviderConstraint === undefined
+            ? command.modelSelection
+            : {
+                ...command.delegationProviderConstraint,
+                model: command.modelSelection.model,
+                options: requestedOptions,
+              }
+          : { ...command.delegationProviderConstraint, options: requestedOptions };
+      const candidateProvider = (provider: ServerProvider) => ({
+        ...provider,
+        enabled:
+          provider.enabled &&
+          resolveProjectProviderInstanceEnabled(
+            settings,
+            parent.thread.projectId,
+            provider.instanceId,
+          ) &&
+          (policy.mode !== "t3-managed" || managedDelegationDrivers.has(provider.driver)) &&
+          resolveSupportedRuntimeMode(
+            command.runtimeMode,
+            provider.supportedRuntimeModes,
+            command.delegationRuntimeModeExplicit !== true,
+          ) !== undefined,
+      });
+      const refreshedIds = new Set<ProviderInstanceId>();
+      const refreshDelegationAccounts = Effect.fnUntraced(function* (
+        accounts: ReadonlyArray<ServerProvider>,
+      ) {
+        if (accounts.length === 0) return;
+        yield* Effect.forEach(
+          accounts,
+          (provider) => {
+            refreshedIds.add(provider.instanceId);
+            return providerRegistry.refreshInstance(provider.instanceId);
+          },
+          { concurrency: 2, discard: true },
+        );
+        providers = yield* providerRegistry.getProviders;
+      });
       const relevantDrivers = new Set(
         policy.routes
           .filter((route) => route.capabilities.includes(capability))
@@ -814,7 +860,7 @@ const make = Effect.gen(function* () {
       );
       if (role === "advice" || role === "review")
         relevantDrivers.add(ProviderDriverKind.make("claudeAgent"));
-      const staleAccounts = providers.filter((provider) => {
+      const staleAccounts = providers.map(candidateProvider).filter((provider) => {
         if (
           !["codex", "claudeAgent"].includes(provider.driver) ||
           !relevantDrivers.has(provider.driver) ||
@@ -823,12 +869,7 @@ const make = Effect.gen(function* () {
           !provider.installed ||
           provider.availability === "unavailable" ||
           !["ready", "warning"].includes(provider.status) ||
-          provider.auth.status === "unauthenticated" ||
-          !resolveProjectProviderInstanceEnabled(
-            settings,
-            parent.thread.projectId,
-            provider.instanceId,
-          )
+          provider.auth.status === "unauthenticated"
         )
           return false;
         const observedMs = Date.parse(provider.usageLimits?.checkedAt ?? "");
@@ -854,28 +895,65 @@ const make = Effect.gen(function* () {
           staleCheckMs - observedMs > 300_000
         );
       });
-      if (staleAccounts.length > 0) {
-        yield* Effect.forEach(
-          staleAccounts,
-          (provider) => providerRegistry.refreshInstance(provider.instanceId),
-          { concurrency: 2, discard: true },
-        );
-        providers = yield* providerRegistry.getProviders;
-      }
-      const explicit =
-        command.delegationTargetExplicit === true ||
-        command.delegationProviderConstraint !== undefined;
-      const requestedTarget = !explicit
-        ? undefined
-        : command.delegationTargetExplicit
-          ? command.delegationProviderConstraint === undefined
-            ? command.modelSelection
-            : {
-                ...command.delegationProviderConstraint,
-                model: command.modelSelection.model,
-                options: requestedOptions,
-              }
-          : { ...command.delegationProviderConstraint, options: requestedOptions };
+      yield* refreshDelegationAccounts(staleAccounts);
+      const selectionInput = {
+        policy,
+        providers: providers.map(candidateProvider),
+        parent: parent.thread.modelSelection,
+        rootModel: root.thread.modelSelection.model,
+        role,
+        capability,
+        nowMs: yield* Clock.currentTimeMillis,
+        runtimeMode: command.runtimeMode,
+        hiddenModelsByInstance: Object.fromEntries(
+          Object.entries(settings.providerModelPreferences ?? {}).map(
+            ([instanceId, preferences]) => [instanceId, preferences.hiddenModels] as const,
+          ),
+        ),
+        allowedProviderInstanceIds: servingInstances,
+        ...(requestedTarget === undefined ? {} : { requestedTarget }),
+        activeAssignments: parent.subagents
+          .filter((task) => ["pending", "running", "waiting"].includes(task.status))
+          .flatMap((task) => (task.modelSelection ? [task.modelSelection] : [])),
+        excludedReviewerModels: [...excludedReviewerModels],
+      };
+      const failedRequestedAccounts = requestedTarget
+        ? selectionInput.providers.filter(
+            (provider) =>
+              provider.enabled &&
+              provider.installed &&
+              !refreshedIds.has(provider.instanceId) &&
+              servingInstances.includes(provider.instanceId) &&
+              (requestedTarget.instanceId === undefined ||
+                requestedTarget.instanceId === provider.instanceId) &&
+              (!("driver" in requestedTarget) ||
+                requestedTarget.driver === undefined ||
+                requestedTarget.driver === provider.driver) &&
+              (provider.availability === "unavailable" ||
+                !["ready", "warning"].includes(provider.status) ||
+                provider.auth.status === "unauthenticated"),
+          )
+        : [];
+      const requestedSelection =
+        failedRequestedAccounts.length > 0
+          ? selectDelegationTarget({
+              ...selectionInput,
+              policy: { ...policy, allowFallback: false },
+            })
+          : undefined;
+      const recoverRequestedHealth =
+        requestedSelection !== undefined &&
+        !requestedSelection.ok &&
+        (requestedSelection.error.unavailableReason !== undefined ||
+          failedRequestedAccounts.some(
+            (provider) =>
+              provider.models.length === 0 &&
+              policy.routes.some(
+                (route) =>
+                  route.driver === provider.driver && route.capabilities.includes(capability),
+              ),
+          ));
+      if (recoverRequestedHealth) yield* refreshDelegationAccounts(failedRequestedAccounts);
       if (requestedTarget && requestedOptions.length > 0) {
         const requestedModels = providers
           .filter(
@@ -905,49 +983,10 @@ const make = Effect.gen(function* () {
         )
           return yield* new ThreadManagementDelegationOptionsError({ category: "invalid-options" });
       }
-      const runtimeModes = new Map(
-        providers.map((provider) => [
-          provider.instanceId,
-          resolveSupportedRuntimeMode(
-            command.runtimeMode,
-            provider.supportedRuntimeModes,
-            command.delegationRuntimeModeExplicit !== true,
-          ),
-        ]),
-      );
-      const candidateProviders = providers.map((provider) => ({
-        ...provider,
-        enabled:
-          resolveProjectProviderInstanceEnabled(
-            settings,
-            parent.thread.projectId,
-            provider.instanceId,
-          ) &&
-          (policy.mode !== "t3-managed" || managedDelegationDrivers.has(provider.driver)) &&
-          runtimeModes.get(provider.instanceId) !== undefined,
-        models: provider.models,
-      }));
-      const selectionNowMs = yield* Clock.currentTimeMillis;
       const selection = selectDelegationTarget({
-        policy,
-        providers: candidateProviders,
-        parent: parent.thread.modelSelection,
-        rootModel: root.thread.modelSelection.model,
-        role,
-        capability,
-        nowMs: selectionNowMs,
-        runtimeMode: command.runtimeMode,
-        hiddenModelsByInstance: Object.fromEntries(
-          Object.entries(settings.providerModelPreferences ?? {}).map(
-            ([instanceId, preferences]) => [instanceId, preferences.hiddenModels] as const,
-          ),
-        ),
-        allowedProviderInstanceIds: servingInstances,
-        ...(requestedTarget === undefined ? {} : { requestedTarget }),
-        activeAssignments: parent.subagents
-          .filter((task) => ["pending", "running", "waiting"].includes(task.status))
-          .flatMap((task) => (task.modelSelection ? [task.modelSelection] : [])),
-        excludedReviewerModels: [...excludedReviewerModels],
+        ...selectionInput,
+        providers: providers.map(candidateProvider),
+        nowMs: yield* Clock.currentTimeMillis,
       });
       if (!selection.ok) return yield* selection.error;
       const preserveRequestedOptions = explicit && !selection.decision.substitution;
@@ -965,7 +1004,12 @@ const make = Effect.gen(function* () {
               ],
             }
           : selection.modelSelection,
-        runtimeMode: runtimeModes.get(selection.modelSelection.instanceId)!,
+        runtimeMode: resolveSupportedRuntimeMode(
+          command.runtimeMode,
+          providers.find((provider) => provider.instanceId === selection.modelSelection.instanceId)!
+            .supportedRuntimeModes,
+          command.delegationRuntimeModeExplicit !== true,
+        )!,
         routingDecision: selection.decision,
       };
     },

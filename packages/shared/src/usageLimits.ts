@@ -153,18 +153,52 @@ const nativeReport = (provider: ServerProvider): AccountReport => ({
  * Pass every enabled login, read or not, so an unreadable workspace still
  * counts as one.
  */
-function accountKeyResolver(reports: Iterable<AccountReport>) {
+function accountKeyResolver(reports: Iterable<AccountReport>, sources: UsageLimitSourceSnapshots) {
+  const ambiguous = new Set<string>();
+  const accounts = new Map<string, { id: string; workspaceId: string | undefined }>();
+  for (const source of sources) {
+    for (const account of source.accounts) {
+      if (!account.email?.trim()) continue;
+      const key = accountKey(account.driver, account.email, account.usageLimits);
+      if (!key) continue;
+      const id = `${source.id}:${account.id}`;
+      const previous = accounts.get(key);
+      if (previous && previous.id !== id && (!previous.workspaceId || !account.workspaceId)) {
+        ambiguous.add(key);
+      }
+      accounts.set(key, { id, workspaceId: account.workspaceId });
+    }
+  }
   const workspaces = new Map<string, Set<string>>();
+  const observations = new Map<string, { count: number; unknown: boolean; paid: boolean }>();
   for (const report of reports) {
     const key = accountKey(report.driver, report.email, report.usageLimits);
-    if (key && report.workspaceId) {
+    if (!key) continue;
+    if (report.workspaceId) {
       workspaces.set(key, (workspaces.get(key) ?? new Set()).add(report.workspaceId));
     }
+    if (!report.email?.trim()) continue;
+    const previous = observations.get(key);
+    const observation = {
+      count: (previous?.count ?? 0) + 1,
+      unknown: previous?.unknown === true || !report.workspaceId,
+      paid:
+        previous?.paid === true ||
+        Boolean(
+          report.usageLimits?.credits ||
+          report.usageLimits?.extraUsage ||
+          report.usageLimits?.resetCredits,
+        ),
+    };
+    observations.set(key, observation);
+    // Email cannot attach paid allowance to another report without verified organization identity.
+    if (observation.count > 1 && observation.unknown && observation.paid) ambiguous.add(key);
   }
   return (report: AccountReport): string | null => {
     const key = accountKey(report.driver, report.email, report.usageLimits);
     if (!key) return null;
     if (report.workspaceId) return `${key}:${report.workspaceId}`;
+    if (ambiguous.has(key)) return null;
     const known = workspaces.get(key);
     if (!known) return key;
     return known.size === 1 ? `${key}:${[...known][0]}` : null;
@@ -267,6 +301,9 @@ export function collectLimitAccounts(presentations: LimitPresentations): readonl
         .map(nativeReport),
       ...(presentation.serverConfig?.usageLimitSources ?? []).flatMap((source) => source.accounts),
     ]),
+    [...presentations.values()].flatMap(
+      (presentation) => presentation.serverConfig?.usageLimitSources ?? [],
+    ),
   );
   for (const [environmentId, presentation] of presentations) {
     const label = presentation.entry.target.label;
@@ -295,8 +332,11 @@ export function collectLimitAccounts(presentations: LimitPresentations): readonl
       for (const account of source.accounts) {
         if (limitsNotice(account.usageLimits) !== null) continue;
         const key = `${source.id}:${account.id}${account.workspaceId ? `:${account.workspaceId}` : ""}`;
-        merge(resolveKey(account) ?? key, {
-          key,
+        const resolved = resolveKey(account);
+        const displayKey =
+          !resolved && labelEnvironment && account.email?.trim() ? `${environmentId}:${key}` : key;
+        merge(resolved ?? displayKey, {
+          key: displayKey,
           driver: account.driver,
           displayName: account.email ? null : account.id.replace(/\.json$/i, ""),
           email: account.email,
@@ -642,10 +682,13 @@ export function collectProviderUsageLimits(
   const native = providersWithLimits(providers).filter(
     (provider) => provider.driver === selected.driver,
   );
-  const resolveKey = accountKeyResolver([
-    ...providers.filter((provider) => provider.enabled).map(nativeReport),
-    ...sources.flatMap((source) => source.accounts),
-  ]);
+  const resolveKey = accountKeyResolver(
+    [
+      ...providers.filter((provider) => provider.enabled).map(nativeReport),
+      ...sources.flatMap((source) => source.accounts),
+    ],
+    sources,
+  );
   const nativeAccounts = new Set(
     native.flatMap((provider) => {
       const key = resolveKey(nativeReport(provider));

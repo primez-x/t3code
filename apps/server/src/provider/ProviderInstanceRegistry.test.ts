@@ -1,3 +1,7 @@
+// @effect-diagnostics nodeBuiltinImport:off - SDK mocks change account metadata across Promise boundaries.
+import * as NodeFSP from "node:fs/promises";
+import * as ClaudeSdk from "@anthropic-ai/claude-agent-sdk";
+import { vi } from "vite-plus/test";
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 import * as CodexInstallation from "./CodexInstallation.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
@@ -42,6 +46,8 @@ import * as ProviderEventLoggers from "@t3tools/provider-core/server/ProviderEve
 import { makeProviderInstanceRegistry } from "./ProviderInstanceRegistry.ts";
 import * as ProviderOrchestrationAdapterInfrastructure from "./ProviderOrchestrationAdapterInfrastructure.ts";
 import * as ProviderHostLive from "./ProviderHostLive.ts";
+
+vi.mock("@anthropic-ai/claude-agent-sdk", { spy: true });
 
 const layerTestHttpClient = Layer.succeed(
   HttpClient.HttpClient,
@@ -432,6 +438,178 @@ describe("ProviderInstanceRegistry — multi-instance codex slice", () => {
         auth: { status: "authenticated" },
       });
     }).pipe(Effect.provide(layerTest)),
+  );
+
+  const createClaudeDriver = Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const fixtures = yield* makeTildeProviderFixtures();
+    const accountPath = path.join(fixtures.claudeHomePath, ".claude.json");
+    yield* fs.writeFileString(
+      accountPath,
+      JSON.stringify({ oauthAccount: { organizationUuid: "org-a" } }),
+    );
+    const instanceId = ProviderInstanceId.make("claude_account_cache");
+    const { registry } = yield* makeProviderInstanceRegistry<ClaudeDriverEnv>({
+      drivers: [ClaudeDriver],
+      configMap: {
+        [instanceId]: {
+          driver: ProviderDriverKind.make("claudeAgent"),
+          enabled: true,
+          config: makeClaudeConfig({
+            enabled: true,
+            binaryPath: fixtures.claudeBinaryPath,
+            homePath: fixtures.claudeHomePath,
+          }),
+        },
+      },
+    });
+    const instance = yield* registry.getInstance(instanceId);
+    return { instance: instance!, accountPath };
+  });
+
+  it.live.each(["success", "usageFailure", "initFailure"])(
+    "refreshes Claude account cache after an organization switch with %s",
+    (outcome) =>
+      Effect.gen(function* () {
+        if (yield* HostProcess.isWindows) return;
+        const fs = yield* FileSystem.FileSystem;
+        let secondAccount = false;
+        const query = vi.spyOn(ClaudeSdk, "query").mockImplementation(() => {
+          const accountB = secondAccount;
+          return {
+            initializationResult: async () => {
+              if (accountB && outcome === "initFailure") throw new Error("Initialization failed");
+              return {
+                account: {
+                  email: "same@example.com",
+                  subscriptionType: "max",
+                  tokenSource: "oauth",
+                },
+                commands: [],
+              };
+            },
+            usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET: async () => {
+              if (accountB && outcome === "usageFailure") throw new Error("Usage failed");
+              return {
+                rate_limits_available: true,
+                rate_limits: { five_hour: { utilization: accountB ? 5 : 95, resets_at: null } },
+              };
+            },
+          } as unknown as ReturnType<typeof ClaudeSdk.query>;
+        });
+        yield* Effect.addFinalizer(() => Effect.sync(() => query.mockRestore()));
+        const { instance, accountPath } = yield* createClaudeDriver;
+        const first = yield* instance.snapshot.refresh;
+        expect(first.auth).toMatchObject({ email: "same@example.com", workspaceId: "org-a" });
+        expect(first.usageLimits?.windows[0]?.usedPercent).toBe(95);
+        yield* instance.snapshot.refresh;
+        expect(query).toHaveBeenCalledTimes(1);
+
+        secondAccount = true;
+        yield* fs.writeFileString(
+          accountPath,
+          JSON.stringify({ oauthAccount: { organizationUuid: "org-b" } }),
+        );
+        const second = yield* instance.snapshot.refresh;
+        expect(second.auth.workspaceId).toBe("org-b");
+        expect(second.auth.status).toBe(outcome === "initFailure" ? "unknown" : "authenticated");
+        if (outcome === "success") {
+          expect(second.auth.email).toBe(first.auth.email);
+          expect(second.usageLimits?.windows[0]?.usedPercent).toBe(5);
+        } else {
+          expect(second.usageLimits?.windows ?? []).toEqual([]);
+        }
+        yield* instance.snapshot.refresh;
+        expect(query).toHaveBeenCalledTimes(2);
+      }).pipe(Effect.provide(layerTest)),
+  );
+
+  it.live.skipIf(windowsHost)("never relabels Claude probe usage with later account metadata", () =>
+    Effect.gen(function* () {
+      let accountPath = "";
+      let probes = 0;
+      const query = vi.spyOn(ClaudeSdk, "query").mockImplementation(() => {
+        const firstProbe = probes++ === 0;
+        return {
+          initializationResult: async () => ({
+            account: { email: "same@example.com", subscriptionType: "max", tokenSource: "oauth" },
+            commands: [],
+          }),
+          usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET: async () => {
+            await NodeFSP.writeFile(
+              accountPath,
+              JSON.stringify({ oauthAccount: { organizationUuid: "org-b" } }),
+            );
+            return {
+              rate_limits_available: true,
+              rate_limits: { five_hour: { utilization: firstProbe ? 95 : 5, resets_at: null } },
+            };
+          },
+        } as unknown as ReturnType<typeof ClaudeSdk.query>;
+      });
+      yield* Effect.addFinalizer(() => Effect.sync(() => query.mockRestore()));
+      const driver = yield* createClaudeDriver;
+      accountPath = driver.accountPath;
+      const first = yield* driver.instance.snapshot.refresh;
+      expect(first.auth.workspaceId).toBe("org-a");
+      expect(first.usageLimits?.windows[0]?.usedPercent).toBe(95);
+      const second = yield* driver.instance.snapshot.refresh;
+      expect(second.auth.workspaceId).toBe("org-b");
+      expect(second.usageLimits?.windows[0]?.usedPercent).toBe(5);
+      expect(query).toHaveBeenCalledTimes(2);
+    }).pipe(Effect.provide(layerTest)),
+  );
+
+  it.live.skipIf(windowsHost)(
+    "discards Claude probe data when the cache identity changes before SDK startup",
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        let switchAfterRead = false;
+        const query = vi.spyOn(ClaudeSdk, "query").mockImplementation(
+          () =>
+            ({
+              initializationResult: async () => ({
+                account: {
+                  email: "same@example.com",
+                  subscriptionType: "max",
+                  tokenSource: "oauth",
+                },
+                commands: [],
+              }),
+              usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET: async () => ({
+                rate_limits_available: true,
+                rate_limits: { five_hour: { utilization: 5, resets_at: null } },
+              }),
+            }) as unknown as ReturnType<typeof ClaudeSdk.query>,
+        );
+        yield* Effect.addFinalizer(() => Effect.sync(() => query.mockRestore()));
+        const driver = yield* createClaudeDriver.pipe(
+          Effect.provideService(FileSystem.FileSystem, {
+            ...fs,
+            readFileString: (filePath, encoding) =>
+              fs.readFileString(filePath, encoding).pipe(
+                Effect.tap(() => {
+                  if (!switchAfterRead || !filePath.endsWith("/.claude.json")) return Effect.void;
+                  switchAfterRead = false;
+                  return fs.writeFileString(
+                    filePath,
+                    JSON.stringify({ oauthAccount: { organizationUuid: "org-b" } }),
+                  );
+                }),
+              ),
+          }),
+        );
+        switchAfterRead = true;
+        const first = yield* driver.instance.snapshot.refresh;
+        expect(first.auth).toMatchObject({ status: "unknown", workspaceId: "org-b" });
+        expect(first.usageLimits?.windows ?? []).toEqual([]);
+        const second = yield* driver.instance.snapshot.refresh;
+        expect(second.auth.workspaceId).toBe("org-b");
+        expect(second.usageLimits?.windows[0]?.usedPercent).toBe(5);
+        expect(query).toHaveBeenCalledTimes(2);
+      }).pipe(Effect.provide(layerTest)),
   );
 
   const redeemClaudeReset = (claim: { result: string; usageFailsAfterClaim: boolean }) =>

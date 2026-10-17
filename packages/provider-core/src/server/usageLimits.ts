@@ -52,6 +52,7 @@ export function applyUsageLimitsUpdate(input: {
   readonly previous: ServerProviderUsageLimits | undefined;
   readonly update: ProviderUsageLimitsUpdate;
   readonly checkedAt: string;
+  readonly previousCheckedAt?: string | undefined;
 }): ServerProviderUsageLimits | undefined {
   const { previous, update } = input;
   if (
@@ -89,7 +90,12 @@ export function applyUsageLimitsUpdate(input: {
     extraUsage?.available !== previous?.extraUsage?.available ||
     extraUsage?.usedPercent !== previous?.extraUsage?.usedPercent ||
     extraUsage?.coversModelLimits !== previous?.extraUsage?.coversModelLimits;
-  for (const window of update.windows) {
+  const acceptsWindows =
+    !previous ||
+    previous.unavailable !== undefined ||
+    previous.windows.length === 0 ||
+    Date.parse(input.checkedAt) >= Date.parse(input.previousCheckedAt ?? previous.checkedAt);
+  for (const window of acceptsWindows ? update.windows : []) {
     const existing = merged.get(window.id);
     const next: ServerProviderUsageWindow = {
       ...window,
@@ -143,6 +149,7 @@ function usageWindowEquals(a: ServerProviderUsageWindow, b: ServerProviderUsageW
 export function resolveUsageLimitsAfterProbe(input: {
   readonly published: ServerProviderUsageLimits | undefined;
   readonly probed: ServerProviderUsageLimits | undefined;
+  readonly publishedCheckedAt?: string | undefined;
 }): ServerProviderUsageLimits | undefined {
   const { published, probed } = input;
   const changedAccount =
@@ -159,7 +166,14 @@ export function resolveUsageLimitsAfterProbe(input: {
   }
   if (!published || !probed || probed.unavailable || changedAccount) return probed;
   const observed =
-    latestObservation(published.unavailable ? undefined : published, probed) ?? probed;
+    published.unavailable || published.windows.length === 0
+      ? probed
+      : (latestObservation(
+          input.publishedCheckedAt === undefined
+            ? published
+            : { ...published, checkedAt: input.publishedCheckedAt },
+          probed,
+        ) ?? probed);
   const credits = latestObservation(published.credits, probed.credits);
   const extraUsage = latestObservation(published.extraUsage, probed.extraUsage);
   return observed === probed && credits === probed.credits && extraUsage === probed.extraUsage

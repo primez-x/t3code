@@ -1491,6 +1491,7 @@ describe("orchestrator MCP toolkit", () => {
             expect(capabilities.structuredContent).toMatchObject({
               inheritedProviderInstanceId: codexInstanceId,
               inheritedModel: codexModel,
+              inheritedOptions: [],
               features: {
                 appOwnedSubagents: true,
                 asyncPolling: true,
@@ -1717,6 +1718,7 @@ describe("orchestrator MCP toolkit", () => {
             expect(delegated.status).toBe("completed");
             expect(delegated.summary).toBe(delegatedResult);
             expect(delegated.providerInstanceId).toBe(claudeInstanceId);
+            expect(delegated.options).toEqual([{ id: "effort", value: "medium" }]);
 
             const completedParent = yield* waitForProjection(
               orchestrator,
@@ -2011,6 +2013,25 @@ describe("orchestrator MCP toolkit", () => {
               message: expect.stringContaining("more than once"),
             });
 
+            yield* orchestrator.dispatch({
+              type: "thread.model-selection.set",
+              commandId: CommandId.make("command:mcp-parent:unsafe-options"),
+              threadId: parentThreadId,
+              modelSelection: {
+                ...codexSelection,
+                options: [
+                  { id: "reasoningEffort", value: "max" },
+                  { id: "serviceTier", value: "priority" },
+                ],
+              },
+            });
+            const parentOptions = yield* invoke("orchestrator_capabilities", {});
+            expect(parentOptions.structuredContent).toMatchObject({
+              inheritedOptions: [
+                { id: "reasoningEffort", value: "max" },
+                { id: "serviceTier", value: "priority" },
+              ],
+            });
             const cancellableCall = yield* invoke("delegate_task", {
               task: cancellationPrompt,
               target: {
@@ -2026,6 +2047,7 @@ describe("orchestrator MCP toolkit", () => {
               cancellableCall.structuredContent,
             ).pipe(Effect.orDie);
             expect(cancellable.status).toBe("running");
+            expect(cancellable.options).toEqual([{ id: "reasoningEffort", value: "low" }]);
             expect(cancellable.hasPendingChildRuns).toBe(false);
             yield* waitForProjection(orchestrator, cancellable.childThreadId, (projection) =>
               projection.providerTurns.some((turn) => turn.status === "running"),
@@ -2078,6 +2100,12 @@ describe("orchestrator MCP toolkit", () => {
             ).toMatchObject({ state: "disposed" });
             yield* expectOffersToStay(0);
 
+            yield* orchestrator.dispatch({
+              type: "thread.model-selection.set",
+              commandId: CommandId.make("command:mcp-parent:restore-options"),
+              threadId: parentThreadId,
+              modelSelection: codexSelection,
+            });
             const createInput = {
               clientRequestId: "create-thread-batch-1",
               threads: [

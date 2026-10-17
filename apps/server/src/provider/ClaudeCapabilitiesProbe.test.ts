@@ -76,6 +76,56 @@ it("drops strict MCP mode, and only that, next to an administrator's managed-mcp
 });
 
 it.layer(NodeServices.layer)("Claude capability probe SDK boundary", (it) => {
+  it.effect.each([false, true])(
+    "binds organization identity before SDK usage with failure=%s",
+    (failed) =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const configDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-claude-org-" });
+        const accountPath = path.join(configDir, ".claude.json");
+        yield* fs.writeFileString(
+          accountPath,
+          JSON.stringify({ oauthAccount: { organizationUuid: "org-a" } }),
+        );
+        const query = vi.spyOn(ClaudeSdk, "query").mockImplementation(
+          () =>
+            ({
+              initializationResult: async () => ({
+                account: {
+                  email: "same@example.com",
+                  subscriptionType: "max",
+                  tokenSource: "oauth",
+                },
+                commands: [],
+              }),
+              usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET: async () => {
+                await NodeFSP.writeFile(
+                  accountPath,
+                  JSON.stringify({ oauthAccount: { organizationUuid: "org-b" } }),
+                );
+                if (failed) throw new Error("Usage request failed");
+                return {
+                  rate_limits_available: true,
+                  rate_limits: { five_hour: { utilization: 95, resets_at: null } },
+                };
+              },
+            }) as unknown as ReturnType<typeof ClaudeSdk.query>,
+        );
+        yield* Effect.addFinalizer(() => Effect.sync(() => query.mockRestore()));
+        const settings = decodeClaudeSettings({ homePath: configDir });
+        const cached = yield* Effect.cached(probeClaudeCapabilities(settings));
+        const first = yield* cached;
+        assert.equal(first?.workspaceId, "org-a");
+        assert.equal((yield* cached)?.workspaceId, "org-a");
+        const second = yield* probeClaudeCapabilities(settings);
+        assert.equal(second?.workspaceId, "org-b");
+        assert.equal(second?.email, first?.email);
+        assert.equal(second?.usage === undefined, failed);
+        assert.equal(query.mock.calls.length, 2);
+      }).pipe(Effect.scoped),
+  );
+
   it.effect(
     "discovers commands and skills separately for each cwd without replacing machine metadata",
     () =>
@@ -280,7 +330,7 @@ it.layer(NodeServices.layer)("Claude capability probe SDK boundary", (it) => {
       );
 
       const capabilities = yield* probeClaudeCapabilities(
-        decodeClaudeSettings({ binaryPath: executablePath }),
+        decodeClaudeSettings({ binaryPath: executablePath, homePath: tempDir }),
         {
           ...process.env,
           T3_PROBE_INVOCATION_PATH: invocationPath,

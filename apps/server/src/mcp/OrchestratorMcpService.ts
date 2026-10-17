@@ -1088,11 +1088,6 @@ const make = Effect.gen(function* () {
   const loadOrchestrationCapableInstanceIds = () =>
     providerAdapters.list().pipe(Effect.map((instanceIds) => new Set(instanceIds)));
 
-  /**
-   * Provider snapshots only re-probe while a client is in the foreground, so an
-   * unattended agent can see a provider as unavailable after it was fixed.
-   * Re-probe the requested instance once before refusing it.
-   */
   const assertTargetEnabledForProject = (
     parent: Pick<OrchestrationV2ThreadProjection, "thread">,
     commandId: CommandId,
@@ -1107,20 +1102,31 @@ const make = Effect.gen(function* () {
       .pipe(Effect.mapError(threadManagementFailure));
 
   const resolveTargetRechecking = (input: Parameters<typeof resolveTarget>[0]) => {
-    const instanceId =
+    const requestedDriver = input.target?.driverKind;
+    const requestedInstanceId =
       input.target?.providerInstanceId ??
-      (input.target?.driverKind === undefined
-        ? input.parent.thread.modelSelection.instanceId
-        : undefined);
+      (requestedDriver === undefined ? input.parent.thread.modelSelection.instanceId : undefined);
+    const instanceIds =
+      requestedInstanceId === undefined
+        ? input.providers
+            .filter(
+              (provider) =>
+                provider.driver === requestedDriver && provider.enabled && provider.installed,
+            )
+            .map((provider) => provider.instanceId)
+        : [requestedInstanceId];
     const resolved = resolveTarget(input);
-    if (instanceId === undefined) return resolved;
+    if (instanceIds.length === 0) return resolved;
     return resolved.pipe(
       Effect.catchIf(
         (error) => error.code === "provider_unavailable",
         () =>
-          providerRegistry
-            .refreshInstance(instanceId)
-            .pipe(Effect.flatMap((providers) => resolveTarget({ ...input, providers }))),
+          // Each refresh returns the whole registry, including preceding probe results.
+          Effect.forEach(instanceIds, providerRegistry.refreshInstance).pipe(
+            Effect.flatMap((snapshots) =>
+              resolveTarget({ ...input, providers: snapshots.at(-1) ?? input.providers }),
+            ),
+          ),
       ),
     );
   };
@@ -1251,15 +1257,25 @@ const make = Effect.gen(function* () {
         }
       }
 
+      const inheritsOptions =
+        instanceId === inheritedSelection.instanceId && model === inheritedSelection.model;
+      const options =
+        requestedOptions === undefined
+          ? inheritsOptions
+            ? inheritedSelection.options
+            : undefined
+          : requestedOptions.length === 0 || !inheritsOptions
+            ? requestedOptions
+            : [
+                ...new Map(
+                  [...(inheritedSelection.options ?? []), ...requestedOptions].map((selection) => [
+                    selection.id,
+                    selection,
+                  ]),
+                ).values(),
+              ];
       return {
-        modelSelection:
-          instanceId === inheritedSelection.instanceId &&
-          model === inheritedSelection.model &&
-          requestedOptions === undefined
-            ? inheritedSelection
-            : requestedOptions === undefined
-              ? { instanceId, model }
-              : { instanceId, model, options: requestedOptions },
+        modelSelection: { instanceId, model, ...(options === undefined ? {} : { options }) },
         supportedRuntimeModes: provider.supportedRuntimeModes,
       };
     });
@@ -1383,6 +1399,11 @@ const make = Effect.gen(function* () {
             null);
       const resultTransfer = taskResultTransfer(parentProjection, childProjection, task) ?? null;
       const terminalStatus = terminalRun === undefined ? null : taskStatusForRun(terminalRun);
+      const modelSelection = (taskResultRun ?? childRun)?.modelSelection ??
+        childControls.thread.modelSelection ?? {
+          instanceId: task.providerInstanceId,
+          model: task.model,
+        };
       const response = {
         taskId: task.id,
         childThreadId: task.childThreadId,
@@ -1391,8 +1412,9 @@ const make = Effect.gen(function* () {
         status,
         workState,
         hasPendingChildRuns: hasPendingChildRuns(childProjection, childRun),
-        providerInstanceId: task.providerInstanceId,
-        model: task.model,
+        providerInstanceId: modelSelection.instanceId,
+        model: modelSelection.model,
+        options: modelSelection.options ?? [],
         ...(task.routingDecision === undefined ? {} : { routingDecision: task.routingDecision }),
         summary: derivedResult,
         resultContextTransferId: resultTransfer?.id ?? null,
@@ -1861,6 +1883,7 @@ const make = Effect.gen(function* () {
           parentThreadId: parent?.thread.id ?? null,
           inheritedProviderInstanceId: parent?.thread.modelSelection.instanceId ?? null,
           inheritedModel: parent?.thread.modelSelection.model ?? null,
+          inheritedOptions: parent?.thread.modelSelection.options ?? [],
           runtimeMode: limits.runtimeMode,
           interactionMode: limits.interactionMode,
           providers: providers.map((provider) => {
@@ -2017,10 +2040,7 @@ const make = Effect.gen(function* () {
             parentNodeId: parentRun.rootNodeId,
             task: taskPrompt(input),
             ...(input.title === undefined ? {} : { title: input.title }),
-            modelSelection:
-              input.target?.model === undefined
-                ? { ...target.modelSelection, options: input.target?.options ?? [] }
-                : target.modelSelection,
+            modelSelection: { ...target.modelSelection, options: input.target?.options ?? [] },
             delegationTargetExplicit: input.target?.model !== undefined,
             delegationRuntimeModeExplicit:
               input.runtimeMode !== undefined && input.runtimeMode !== "inherit",

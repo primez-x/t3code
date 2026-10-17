@@ -117,7 +117,8 @@ export const OrchestratorMcpTarget = Schema.Struct({
   ),
   options: Schema.optional(
     OrchestratorMcpTargetOptions.annotate({
-      description: "Model option selections advertised by orchestrator_capabilities.",
+      description:
+        "Model options advertised by orchestrator_capabilities, as selections or an ID/value record. Delegation uses only explicit options plus required route defaults, never parent options. Delegated max/ultra effort, fast mode, and priority service are forbidden. Ordinary create_threads inherits options only for the same instance and model, merges supplied IDs, and clears options with [] or {}.",
     }),
   ),
 });
@@ -205,6 +206,11 @@ export const OrchestratorMcpDelegateTaskResult = Schema.Struct({
   latestTerminalResultContextTransferId: Schema.NullOr(ContextTransferId),
   providerInstanceId: ProviderInstanceId,
   model: Schema.NullOr(Schema.String),
+  options: Schema.optional(
+    Schema.Array(ProviderOptionSelection).annotate({
+      description: "Actual child run options, or child thread options before a run starts.",
+    }),
+  ),
   summary: Schema.NullOr(Schema.String),
   resultContextTransferId: Schema.NullOr(ContextTransferId),
   hasPendingQuestion: Schema.Boolean.annotate({
@@ -502,6 +508,12 @@ export const OrchestratorMcpCapabilitiesResult = Schema.Struct({
   parentThreadId: Schema.NullOr(ThreadId),
   inheritedProviderInstanceId: Schema.NullOr(ProviderInstanceId),
   inheritedModel: Schema.NullOr(Schema.String),
+  inheritedOptions: Schema.optional(
+    Schema.Array(ProviderOptionSelection).annotate({
+      description:
+        "Parent thread options for ordinary thread creation. Parent options never authorize delegated dispatch.",
+    }),
+  ),
   runtimeMode: RuntimeMode,
   interactionMode: ProviderInteractionMode,
   providers: Schema.Array(OrchestratorMcpProviderCapability),
