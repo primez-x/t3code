@@ -564,16 +564,16 @@ describe("orchestrator MCP toolkit", () => {
       (["full", "instance", "driver", "model", "automatic"] as const).flatMap((targetShape) =>
         (["strict", "fallback", "recovery"] as const)
           .filter((outcome) => targetShape !== "automatic" || outcome === "fallback")
-          .map((outcome) => ({
-            mode,
-            targetShape,
-            outcome,
-          })),
+          .flatMap((outcome) =>
+            (targetShape === "full" || targetShape === "instance" ? [true, false] : [true]).map(
+              (installed) => ({ mode, targetShape, outcome, installed }),
+            ),
+          ),
       ),
     ),
   )(
-    "probes failed delegated targets once through MCP: $mode $targetShape $outcome",
-    ({ mode, targetShape, outcome }) =>
+    "probes failed delegated targets once through MCP: $mode $targetShape $outcome installed=$installed",
+    ({ mode, targetShape, outcome, installed }) =>
       Effect.scoped(
         Effect.gen(function* () {
           const cwd = yield* checkpointWorkspace("mcp-delegation-refresh-once");
@@ -606,7 +606,7 @@ describe("orchestrator MCP toolkit", () => {
             usageLimits: { checkedAt, windows: [] },
             supportedRuntimeModes: ["approval-required"] as const,
           };
-          const failed = { ...healthy, status: "error" as const };
+          const failed = { ...healthy, installed, status: "error" as const };
           const codex = {
             ...makeProviderSnapshot({
               instanceId: codexInstanceId,

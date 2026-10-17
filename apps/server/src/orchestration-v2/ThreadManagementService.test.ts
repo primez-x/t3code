@@ -2580,7 +2580,7 @@ it.effect.each([false, true])(
 it.effect.each([
   "disabled",
   "project-disabled",
-  "not-installed",
+  "uninstalled-driver",
   "unregistered",
   "unsupported",
 ] as const)("cached target health never probes a %s target", (reason) => {
@@ -2590,7 +2590,7 @@ it.effect.each([
     ...delegationProvider,
     status: "error" as const,
     enabled: reason !== "disabled",
-    installed: reason !== "not-installed",
+    installed: reason !== "uninstalled-driver",
     driver: ProviderDriverKind.make(reason === "unsupported" ? "custom" : "codex"),
   };
   const routes: ReadonlyArray<DelegationModelRoute> = [
@@ -2607,7 +2607,10 @@ it.effect.each([
     yield* threads
       .dispatch({
         ...delegationCommand(),
-        delegationProviderConstraint: { instanceId: provider.instanceId },
+        delegationProviderConstraint:
+          reason === "uninstalled-driver"
+            ? { driver: provider.driver }
+            : { instanceId: provider.instanceId },
       })
       .pipe(Effect.flip);
     expect(refreshed).toEqual([]);

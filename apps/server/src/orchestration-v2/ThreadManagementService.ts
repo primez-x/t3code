@@ -921,7 +921,7 @@ const make = Effect.gen(function* () {
         ? selectionInput.providers.filter(
             (provider) =>
               provider.enabled &&
-              provider.installed &&
+              (provider.installed || requestedTarget.instanceId === provider.instanceId) &&
               !refreshedIds.has(provider.instanceId) &&
               servingInstances.includes(provider.instanceId) &&
               (requestedTarget.instanceId === undefined ||
