@@ -246,6 +246,58 @@ describe("pools", () => {
   };
   const laptop = { entry: { target: { label: "Laptop" } } };
 
+  it.each([undefined, "", "   "])(
+    "keeps anonymous hub accounts separate across environments with email=%j",
+    (email) => {
+      const reports = [false, true].map((exhausted) => ({
+        ...laptop,
+        serverConfig: {
+          providers: [],
+          usageLimitSources: [
+            {
+              ...source,
+              accounts: [
+                {
+                  id: "account.json",
+                  driver: claude,
+                  ...(email === undefined ? {} : { email }),
+                  usageLimits: {
+                    checkedAt: exhausted ? "2026-09-03T11:30:00.000Z" : checkedAt,
+                    windows: [{ ...window, usedPercent: exhausted ? 100 : 20 }],
+                    ...(exhausted
+                      ? {}
+                      : {
+                          extraUsage: {
+                            checkedAt,
+                            enabled: true,
+                            available: true,
+                            coversModelLimits: true,
+                          },
+                        }),
+                  },
+                },
+              ],
+            },
+          ],
+        },
+      }));
+      const accounts = collectLimitAccounts(
+        new Map([
+          [EnvironmentId.make("env-a"), reports[0]!],
+          [EnvironmentId.make("env-b"), reports[1]!],
+        ]),
+      );
+      expect(accounts).toHaveLength(2);
+      expect(accounts.map((account) => account.key)).toEqual([
+        "env-a:hub:account.json",
+        "env-b:hub:account.json",
+      ]);
+      expect(accounts[0]?.limits.extraUsage?.available).toBe(true);
+      expect(accounts[1]?.limits.extraUsage).toBeUndefined();
+      expect(accounts[1]?.limits.windows[0]?.usedPercent).toBe(100);
+    },
+  );
+
   it("merges one account reported natively on two environments and by a hub into one entry", () => {
     const native = provider({
       driver: claude,
@@ -661,8 +713,8 @@ describe("pools", () => {
       ],
     ]);
     expect(collectLimitAccounts(sameFile).map((account) => account.key)).toEqual([
-      "hub:a.json:ws-1",
-      "hub:a.json:ws-2",
+      "env-a:hub:a.json:ws-1",
+      "env-b:hub:a.json:ws-2",
     ]);
     expect(accounts[1]?.environments.map((environment) => environment.label)).toEqual([
       "Laptop",
@@ -940,7 +992,7 @@ describe("pools", () => {
     ]);
   });
 
-  it("keys a hub account without an email by hub, so two environments on one hub share it", () => {
+  it("keeps anonymous hub filenames local to each environment", () => {
     const seat = {
       id: "claude-team-seat.json",
       driver: claude,
@@ -955,7 +1007,10 @@ describe("pools", () => {
       ],
     ]);
     const accounts = collectLimitAccounts(input);
-    expect(accounts.map((account) => account.key)).toEqual(["hub:claude-team-seat.json"]);
+    expect(accounts.map((account) => account.key)).toEqual([
+      "env-a:hub:claude-team-seat.json",
+      "env-b:hub:claude-team-seat.json",
+    ]);
     expect(accounts[0]?.displayName).toBe("claude-team-seat");
   });
 

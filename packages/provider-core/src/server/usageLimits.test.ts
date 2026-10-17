@@ -210,6 +210,36 @@ describe("applyUsageLimitsUpdate", () => {
 });
 
 describe("resolveUsageLimitsAfterProbe", () => {
+  test.each([undefined, "2026-09-03T12:00:30.000Z"])(
+    "keeps quota evidence through a paid-only probe with silent confirmation %s",
+    (publishedCheckedAt) => {
+      const current = { ...published, windows: [{ ...weekly, usedPercent: 100 }] };
+      const paid = {
+        checkedAt: "2026-09-03T12:01:00.000Z",
+        windows: [],
+        extraUsage: {
+          checkedAt: "2026-09-03T12:01:00.000Z",
+          enabled: false,
+          available: false,
+          coversModelLimits: true,
+        },
+      };
+      const result = resolveUsageLimitsAfterProbe({
+        published: current,
+        probed: paid,
+        publishedCheckedAt,
+      });
+      expect(result?.windows).toEqual(current.windows);
+      expect(result?.checkedAt).toBe(publishedCheckedAt ?? current.checkedAt);
+      expect(result?.extraUsage).toEqual(paid.extraUsage);
+      expect(
+        resolveUsageLimitsAfterProbe({
+          published: { ...current, credentialFingerprint: "old" },
+          probed: { ...paid, credentialFingerprint: "new" },
+        })?.windows,
+      ).toEqual([]);
+    },
+  );
   test("keeps live windows when an older probe completes with updated metadata", () => {
     const current = {
       ...published,

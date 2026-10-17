@@ -1988,7 +1988,7 @@ const make = Effect.gen(function* () {
         const target: ResolvedTarget =
           isRetryOfAcceptedDelegation || automaticTarget
             ? unresolvedTarget
-            : yield* resolveTargetRechecking({
+            : yield* resolveTarget({
                 parent,
                 target: input.target,
                 providers: yield* loadProviders,

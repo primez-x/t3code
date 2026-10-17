@@ -10,6 +10,7 @@ import {
   ServerProviderUsageLimits,
 } from "@t3tools/contracts";
 import { museSubscriptionUsageToUpdate } from "../../../../packages/provider-muse/src/server/usageLimits.ts";
+import { resolveUsageLimitsAfterProbe } from "../../../../packages/provider-core/src/server/usageLimits.ts";
 import { selectDelegationTarget } from "./delegationRouting.ts";
 
 const nowMs = Date.parse("2026-10-14T12:00:00Z");
@@ -159,6 +160,17 @@ describe("selectDelegationTarget", () => {
   });
 
   const paidCredits = { checkedAt, hasCredits: true, unlimited: false, balance: "12500" };
+  test("rejects exhausted quota after a newer paid-only probe", () => {
+    const usageLimits = resolveUsageLimitsAfterProbe({
+      published: limits(100),
+      probed: {
+        checkedAt: "2026-10-14T12:00:00Z",
+        windows: [],
+        extraUsage: { checkedAt, enabled: false, available: false, coversModelLimits: true },
+      },
+    });
+    expect(select({ providers: [{ ...codex, usageLimits }] }).ok).toBe(false);
+  });
   const exhaustedWithCredits = (credits = paidCredits) => ({
     ...codex,
     usageLimits: { ...limits(100), credits },

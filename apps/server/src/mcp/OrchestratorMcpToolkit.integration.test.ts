@@ -75,6 +75,7 @@ import {
   materializeReplayTranscriptWorkspace,
 } from "@t3tools/provider-testing/replayTranscript";
 import * as ProviderRegistryMock from "../provider/testUtils/providerRegistryMock.ts";
+import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
 import * as ProjectService from "../project/ProjectService.ts";
 import * as ScheduledTaskService from "../scheduledTasks/ScheduledTaskService.ts";
 import * as SecretRequests from "../secrets/SecretRequests.ts";
@@ -558,6 +559,227 @@ const layerUnusedScheduledTaskStub = Layer.succeed(
 );
 
 describe("orchestrator MCP toolkit", () => {
+  it.live.each(
+    (["t3-managed", "native-preferred"] as const).flatMap((mode) =>
+      (["full", "instance", "driver", "model", "automatic"] as const).flatMap((targetShape) =>
+        (["strict", "fallback", "recovery"] as const)
+          .filter((outcome) => targetShape !== "automatic" || outcome === "fallback")
+          .map((outcome) => ({
+            mode,
+            targetShape,
+            outcome,
+          })),
+      ),
+    ),
+  )(
+    "probes failed delegated targets once through MCP: $mode $targetShape $outcome",
+    ({ mode, targetShape, outcome }) =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const cwd = yield* checkpointWorkspace("mcp-delegation-refresh-once");
+          const capturedTurns = yield* Ref.make<ReadonlyArray<CapturedTurn>>([]);
+          const layerRegistry = ProviderAdapterRegistry.layerFromAdapters([
+            makeDeterministicAdapter({
+              instanceId: codexInstanceId,
+              driver: ProviderDriverKind.make("codex"),
+              capabilities: CodexProviderCapabilitiesV2,
+              capturedTurns,
+              shouldComplete: () => false,
+              response: () => "unused",
+            }),
+            makeDeterministicAdapter({
+              instanceId: claudeInstanceId,
+              driver: ProviderDriverKind.make("claudeAgent"),
+              capabilities: ClaudeProviderCapabilitiesV2,
+              capturedTurns,
+              shouldComplete: () => false,
+              response: () => "unused",
+            }),
+          ]);
+          const checkedAt = DateTime.formatIso(yield* DateTime.now);
+          const healthy = {
+            ...makeProviderSnapshot({
+              instanceId: claudeInstanceId,
+              driver: ProviderDriverKind.make("claudeAgent"),
+              model: claudeModel,
+            }),
+            usageLimits: { checkedAt, windows: [] },
+            supportedRuntimeModes: ["approval-required"] as const,
+          };
+          const failed = { ...healthy, status: "error" as const };
+          const codex = {
+            ...makeProviderSnapshot({
+              instanceId: codexInstanceId,
+              driver: ProviderDriverKind.make("codex"),
+              model: codexModel,
+            }),
+            usageLimits: { checkedAt, windows: [] },
+          };
+          const providers = yield* Ref.make<ReadonlyArray<ServerProvider>>([codex, failed]);
+          const refreshed = yield* Ref.make<ReadonlyArray<ProviderInstanceId>>([]);
+          const layerProviderRegistry = Layer.effect(
+            ProviderRegistry.ProviderRegistry,
+            Effect.gen(function* () {
+              const registry = yield* ProviderRegistry.ProviderRegistry;
+              return {
+                ...registry,
+                getProviders: Ref.get(providers),
+                refreshInstance: (instanceId: ProviderInstanceId) =>
+                  Effect.gen(function* () {
+                    yield* Ref.update(refreshed, (ids) => [...ids, instanceId]);
+                    if (outcome === "recovery") yield* Ref.set(providers, [codex, healthy]);
+                    return yield* Ref.get(providers);
+                  }),
+              };
+            }),
+          ).pipe(Layer.provide(ProviderRegistryMock.layer()));
+          const layerSettings = ServerSettings.layerTest({
+            delegationPolicy: {
+              ...toolkitDelegationPolicy,
+              mode,
+              allowFallback: outcome !== "strict",
+            },
+          });
+          const layerOrchestrator = ProviderReplayHarness.layerWithRegistry(
+            { name: "mcp-delegation-refresh-once", runtimePolicyOverride: { cwd } },
+            layerRegistry,
+          );
+          const layerOrchestration = Layer.merge(
+            layerOrchestrator,
+            ThreadManagementService.layer.pipe(
+              Layer.provide(layerOrchestrator),
+              Layer.provide(layerRegistry),
+              Layer.provide(layerProviderRegistry),
+              Layer.provide(layerSettings),
+              Layer.provide(
+                CommandReceiptStore.layer.pipe(Layer.provide(SqlitePersistence.layerMemory)),
+              ),
+            ),
+          );
+          const layerTest = layerOrchestratorToolkit.pipe(
+            Layer.provideMerge(McpServer.McpServer.layer),
+            Layer.provideMerge(layerOrchestration),
+            Layer.provide(layerRegistry),
+            Layer.provide(layerProviderRegistry),
+            Layer.provide(layerSettings),
+            Layer.provide(layerUnusedScheduledTaskStub),
+            Layer.provide(Layer.mock(ProjectService.ProjectService)({})),
+            Layer.provideMerge(
+              SecretRequests.layer.pipe(
+                Layer.provide(layerMemorySecretStore),
+                Layer.provide(layerOrchestration),
+              ),
+            ),
+            Layer.provide(NodeServices.layer),
+          );
+          yield* Effect.gen(function* () {
+            const orchestrator = yield* Orchestrator.OrchestratorV2;
+            const server = yield* McpServer.McpServer;
+            yield* orchestrator.dispatch({
+              type: "thread.create",
+              createdBy: "user",
+              creationSource: "web",
+              commandId: CommandId.make("command:refresh-once:create"),
+              threadId: parentThreadId,
+              projectId,
+              title: "Refresh parent",
+              modelSelection: codexSelection,
+              runtimeMode: "full-access",
+              interactionMode: "default",
+              branch: null,
+              worktreePath: cwd,
+            });
+            const started = yield* orchestrator.dispatch({
+              type: "message.dispatch",
+              createdBy: "user",
+              creationSource: "web",
+              commandId: CommandId.make("command:refresh-once:start"),
+              threadId: parentThreadId,
+              messageId: MessageId.make("message:refresh-once:start"),
+              text: parentPrompt,
+              attachments: [],
+              modelSelection: codexSelection,
+              dispatchMode: { type: "start_immediately" },
+            });
+            yield* orchestrator
+              .streamStoredEventsFrom({ threadId: parentThreadId, afterSequence: started.sequence })
+              .pipe(
+                Stream.filter(
+                  (stored) =>
+                    stored.event.type === "provider-turn.updated" &&
+                    stored.event.payload.status === "running",
+                ),
+                Stream.runHead,
+              );
+            const invocation: McpInvocationContext.McpInvocationScope = {
+              environmentId: EnvironmentId.make("environment:refresh-once"),
+              requestNamespace: "refresh-once-parent",
+              thread: {
+                threadId: parentThreadId,
+                providerSessionId: "refresh-once-parent",
+                providerInstanceId: codexInstanceId,
+              },
+              client: undefined,
+              capabilities: new Set(["orchestration"]),
+              issuedAt: 1,
+            };
+            const target =
+              targetShape === "full"
+                ? { providerInstanceId: claudeInstanceId, model: claudeModel }
+                : targetShape === "instance"
+                  ? { providerInstanceId: claudeInstanceId }
+                  : targetShape === "driver"
+                    ? { driverKind: "claudeAgent" }
+                    : targetShape === "model"
+                      ? { model: claudeModel }
+                      : undefined;
+            const delegate = server
+              .callTool({
+                name: "delegate_task",
+                arguments: {
+                  task: delegatedPrompt,
+                  target,
+                  mode: "async",
+                  clientRequestId: "refresh-once-delegation",
+                },
+              })
+              .pipe(
+                Effect.provideService(McpInvocationContext.McpInvocationContext, invocation),
+                Effect.provideService(McpSchema.McpServerClient, client),
+              );
+            const result = yield* delegate;
+            expect(yield* Ref.get(refreshed)).toEqual(
+              targetShape === "automatic" ? [] : [claudeInstanceId],
+            );
+            const parent = yield* orchestrator.getThreadProjection(parentThreadId);
+            if (outcome === "strict") {
+              expect(declaredFailure(result)).toMatchObject({ code: "model_unavailable" });
+              expect(parent.subagents).toHaveLength(0);
+              return;
+            }
+            const delegated = yield* decodeDelegateTaskResult(result.structuredContent);
+            const expectedInstanceId = outcome === "recovery" ? claudeInstanceId : codexInstanceId;
+            expect(delegated.providerInstanceId).toBe(expectedInstanceId);
+            const child = yield* orchestrator.getThreadProjection(delegated.childThreadId);
+            expect(child.thread.modelSelection.instanceId).toBe(expectedInstanceId);
+            expect(child.thread.runtimeMode).toBe(
+              outcome === "recovery" ? "approval-required" : "full-access",
+            );
+            expect(parent.subagents).toHaveLength(1);
+            yield* Ref.set(providers, [codex, failed]);
+            const replay = yield* decodeDelegateTaskResult((yield* delegate).structuredContent);
+            expect(replay.taskId).toBe(delegated.taskId);
+            expect(yield* Ref.get(refreshed)).toEqual(
+              targetShape === "automatic" ? [] : [claudeInstanceId],
+            );
+            expect(
+              (yield* orchestrator.getThreadProjection(parentThreadId)).subagents,
+            ).toHaveLength(1);
+          }).pipe(Effect.provide(layerTest));
+        }),
+      ),
+  );
+
   it.live(
     "delegates cross-provider tasks, polls and cancels children, and creates ordinary threads",
     () =>

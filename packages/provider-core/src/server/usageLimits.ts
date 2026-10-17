@@ -165,15 +165,15 @@ export function resolveUsageLimitsAfterProbe(input: {
     return published;
   }
   if (!published || !probed || probed.unavailable || changedAccount) return probed;
-  const observed =
+  const publishedQuota =
     published.unavailable || published.windows.length === 0
-      ? probed
-      : (latestObservation(
-          input.publishedCheckedAt === undefined
-            ? published
-            : { ...published, checkedAt: input.publishedCheckedAt },
-          probed,
-        ) ?? probed);
+      ? undefined
+      : input.publishedCheckedAt === undefined
+        ? published
+        : { ...published, checkedAt: input.publishedCheckedAt };
+  const observed =
+    (probed.windows.length === 0 ? publishedQuota : latestObservation(publishedQuota, probed)) ??
+    probed;
   const credits = latestObservation(published.credits, probed.credits);
   const extraUsage = latestObservation(published.extraUsage, probed.extraUsage);
   return observed === probed && credits === probed.credits && extraUsage === probed.extraUsage

@@ -604,6 +604,7 @@ describe("makeManagedServerProvider", () => {
           const credits = { checkedAt: paidAt, hasCredits: true, unlimited: false };
           const probeRef = yield* Ref.make<ServerProvider>({
             ...refreshedSnapshot,
+            auth: { ...refreshedSnapshot.auth, workspaceId: "org-a" },
             usageLimits: { checkedAt: paidAt, windows: [], credits },
           });
           const provider = yield* makeManagedServerProvider<TestSettings>({
@@ -631,6 +632,7 @@ describe("makeManagedServerProvider", () => {
           }
           yield* Ref.set(probeRef, {
             ...refreshedSnapshot,
+            auth: { ...refreshedSnapshot.auth, workspaceId: "org-a" },
             usageLimits: {
               checkedAt: "2026-04-10T12:06:00.000Z",
               windows: [{ ...window, usedPercent: 20 }],
@@ -659,6 +661,7 @@ describe("makeManagedServerProvider", () => {
           } as const;
           const probeRef = yield* Ref.make<ServerProvider>({
             ...refreshedSnapshot,
+            auth: { ...refreshedSnapshot.auth, workspaceId: "org-a" },
             usageLimits: { checkedAt: quotaAt, windows: [window], credits },
           });
           const provider = yield* makeManagedServerProvider<TestSettings>({
@@ -692,6 +695,7 @@ describe("makeManagedServerProvider", () => {
           assert.strictEqual(paidUpdate?.usageLimits?.credits?.balance, "10");
           yield* Ref.set(probeRef, {
             ...refreshedSnapshot,
+            auth: { ...refreshedSnapshot.auth, workspaceId: "org-a" },
             usageLimits: {
               checkedAt: "2026-04-10T12:09:30.000Z",
               windows: [{ ...window, usedPercent: 20 }],
@@ -707,6 +711,7 @@ describe("makeManagedServerProvider", () => {
           );
           yield* Ref.set(probeRef, {
             ...refreshedSnapshot,
+            auth: { ...refreshedSnapshot.auth, workspaceId: "org-a" },
             usageLimits: {
               checkedAt: "2026-04-10T12:10:30.000Z",
               windows: [{ ...window, usedPercent: 0 }],
@@ -714,6 +719,264 @@ describe("makeManagedServerProvider", () => {
             },
           });
           assert.strictEqual((yield* provider.refresh).usageLimits?.windows[0]?.usedPercent, 0);
+        }),
+      ).pipe(Effect.provide(layerAlwaysRunTest)),
+  );
+
+  it.effect.each(
+    (
+      [
+        {
+          name: "lost workspace",
+          previousWorkspace: "org-a",
+          nextAuth: { status: "authenticated", email: "same@example.com" },
+        },
+        {
+          name: "unknown workspaces",
+          nextAuth: { status: "authenticated", email: "same@example.com" },
+        },
+        {
+          name: "failed auth initialization",
+          previousWorkspace: "org-a",
+          nextAuth: { status: "unknown" },
+        },
+        {
+          name: "recovered workspace metadata",
+          nextAuth: { status: "authenticated", email: "same@example.com", workspaceId: "org-a" },
+        },
+        {
+          name: "changed credential",
+          previousWorkspace: "org-a",
+          previousFingerprint: "credential-a",
+          nextFingerprint: "credential-b",
+          nextAuth: { status: "authenticated", email: "same@example.com", workspaceId: "org-a" },
+        },
+        {
+          name: "changed email",
+          previousWorkspace: "org-a",
+          previousFingerprint: "credential-a",
+          nextFingerprint: "credential-a",
+          nextAuth: { status: "authenticated", email: "other@example.com", workspaceId: "org-a" },
+        },
+        {
+          name: "changed workspace with matching credential",
+          previousWorkspace: "org-a",
+          previousFingerprint: "credential-a",
+          nextFingerprint: "credential-a",
+          nextAuth: { status: "authenticated", email: "same@example.com", workspaceId: "org-b" },
+        },
+        {
+          name: "unauthenticated workspace metadata",
+          previousWorkspace: "org-a",
+          nextAuth: { status: "unauthenticated", email: "same@example.com", workspaceId: "org-a" },
+        },
+      ] satisfies ReadonlyArray<{
+        name: string;
+        previousWorkspace?: string;
+        previousFingerprint?: string;
+        nextFingerprint?: string;
+        nextAuth: ServerProvider["auth"];
+      }>
+    ).flatMap((scenario) =>
+      [false, true].flatMap((failed) =>
+        [false, true].map((available) => ({ ...scenario, failed, available })),
+      ),
+    ),
+  )(
+    "requires verified continuity for $name with failed=$failed and previous allowance=$available",
+    (scenario) =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const checkedAt = "2026-04-10T12:20:00.000Z";
+          const oldSnapshot: ServerProvider = {
+            ...refreshedSnapshot,
+            auth: {
+              status: "authenticated",
+              email: "same@example.com",
+              workspaceId: scenario.previousWorkspace,
+            },
+            usageLimits: {
+              checkedAt,
+              credentialFingerprint: scenario.previousFingerprint,
+              windows: [{ id: "primary", kind: "session", label: "Session", usedPercent: 95 }],
+              extraUsage: {
+                checkedAt,
+                enabled: true,
+                available: scenario.available,
+                coversModelLimits: true,
+              },
+              credits: { checkedAt, hasCredits: scenario.available, unlimited: false },
+              resetCredits: { availableCount: 2, nextCreditId: "old-credit" },
+            },
+          };
+          const probeRef = yield* Ref.make(oldSnapshot);
+          const provider = yield* makeManagedServerProvider<TestSettings>({
+            resolveMaintenance: () => Effect.succeed(maintenanceCapabilities),
+            getSettings: Effect.succeed({ enabled: true }),
+            streamSettings: Stream.empty,
+            haveSettingsChanged: (previous, next) => previous.enabled !== next.enabled,
+            initialSnapshot: () => Effect.succeed(initialSnapshot),
+            checkProvider: Ref.get(probeRef),
+            refreshOnInterval: false,
+          });
+          yield* Stream.take(provider.streamChanges, 1).pipe(Stream.runDrain);
+          const next: ServerProvider = {
+            ...refreshedSnapshot,
+            auth: scenario.nextAuth,
+            usageLimits: {
+              checkedAt: "2026-04-10T12:06:00.000Z",
+              credentialFingerprint: scenario.nextFingerprint,
+              windows: scenario.failed
+                ? []
+                : [{ id: "primary", kind: "session", label: "Session", usedPercent: 5 }],
+              ...(scenario.failed ? { unavailable: { reason: "probeFailed" as const } } : {}),
+            },
+          };
+          yield* Ref.set(probeRef, next);
+          const refreshed = yield* provider.refresh;
+          assert.deepStrictEqual(refreshed.usageLimits, next.usageLimits);
+          assert.deepStrictEqual(refreshed.auth, next.auth);
+        }),
+      ).pipe(Effect.provide(layerAlwaysRunTest)),
+  );
+
+  it.effect.each([false, true])(
+    "reports only the fresh paid observation across an identity gap with available=%s",
+    (available) =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const checkedAt = "2026-04-10T12:20:00.000Z";
+          const oldSnapshot: ServerProvider = {
+            ...refreshedSnapshot,
+            auth: { status: "authenticated", email: "same@example.com", workspaceId: "org-a" },
+            usageLimits: {
+              checkedAt,
+              windows: [{ id: "primary", kind: "session", label: "Session", usedPercent: 95 }],
+              extraUsage: {
+                checkedAt,
+                enabled: true,
+                available: !available,
+                coversModelLimits: true,
+              },
+              credits: { checkedAt, hasCredits: !available, unlimited: false },
+              resetCredits: { availableCount: 2 },
+            },
+          };
+          const probeRef = yield* Ref.make(oldSnapshot);
+          const provider = yield* makeManagedServerProvider<TestSettings>({
+            resolveMaintenance: () => Effect.succeed(maintenanceCapabilities),
+            getSettings: Effect.succeed({ enabled: true }),
+            streamSettings: Stream.empty,
+            haveSettingsChanged: (previous, next) => previous.enabled !== next.enabled,
+            initialSnapshot: () => Effect.succeed(initialSnapshot),
+            checkProvider: Ref.get(probeRef),
+            refreshOnInterval: false,
+          });
+          yield* Stream.take(provider.streamChanges, 1).pipe(Stream.runDrain);
+          const probeAt = "2026-04-10T12:06:00.000Z";
+          const next: ServerProvider = {
+            ...refreshedSnapshot,
+            auth: { status: "authenticated", email: "same@example.com" },
+            usageLimits: {
+              checkedAt: probeAt,
+              windows: [{ id: "primary", kind: "session", label: "Session", usedPercent: 5 }],
+              extraUsage: { checkedAt: probeAt, enabled: true, available, coversModelLimits: true },
+            },
+          };
+          yield* Ref.set(probeRef, next);
+          assert.deepStrictEqual(yield* provider.refresh, next);
+          const recovered: ServerProvider = { ...next, auth: oldSnapshot.auth };
+          yield* Ref.set(probeRef, recovered);
+          assert.deepStrictEqual(yield* provider.refresh, recovered);
+        }),
+      ).pipe(Effect.provide(layerAlwaysRunTest)),
+  );
+
+  it.effect.each(
+    ["workspace", "credential", "workspace and credential"].flatMap((identity) =>
+      [false, true].map((failed) => ({ identity, failed })),
+    ),
+  )(
+    "preserves independent clocks with verified $identity continuity and failed=$failed",
+    ({ identity, failed }) =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const quotaAt = "2026-04-10T12:05:00.000Z";
+          const paidAt = "2026-04-10T12:20:00.000Z";
+          const oldSnapshot: ServerProvider = {
+            ...refreshedSnapshot,
+            auth: { status: "authenticated", email: "same@example.com", workspaceId: "org-a" },
+            usageLimits: {
+              checkedAt: quotaAt,
+              ...(identity !== "workspace" ? { credentialFingerprint: "credential-a" } : {}),
+              windows: [{ id: "primary", kind: "session", label: "Session", usedPercent: 95 }],
+              extraUsage: {
+                checkedAt: paidAt,
+                enabled: true,
+                available: true,
+                coversModelLimits: true,
+              },
+              credits: { checkedAt: paidAt, hasCredits: true, unlimited: false },
+              resetCredits: { availableCount: 2 },
+            },
+          };
+          const probeRef = yield* Ref.make(oldSnapshot);
+          const provider = yield* makeManagedServerProvider<TestSettings>({
+            resolveMaintenance: () => Effect.succeed(maintenanceCapabilities),
+            getSettings: Effect.succeed({ enabled: true }),
+            streamSettings: Stream.empty,
+            haveSettingsChanged: (previous, next) => previous.enabled !== next.enabled,
+            initialSnapshot: () => Effect.succeed(initialSnapshot),
+            checkProvider: Ref.get(probeRef),
+            refreshOnInterval: false,
+          });
+          yield* Stream.take(provider.streamChanges, 1).pipe(Stream.runDrain);
+          const next: ServerProvider = {
+            ...refreshedSnapshot,
+            auth: {
+              ...oldSnapshot.auth,
+              ...(identity === "credential" ? { workspaceId: undefined } : {}),
+            },
+            usageLimits: {
+              checkedAt: "2026-04-10T12:06:00.000Z",
+              ...(identity !== "workspace" ? { credentialFingerprint: "credential-a" } : {}),
+              windows: failed
+                ? []
+                : [{ id: "primary", kind: "session", label: "Session", usedPercent: 5 }],
+              ...(failed
+                ? { unavailable: { reason: "probeFailed" as const } }
+                : {
+                    extraUsage: {
+                      checkedAt: quotaAt,
+                      enabled: true,
+                      available: false,
+                      coversModelLimits: true,
+                    },
+                  }),
+            },
+          };
+          yield* Ref.set(probeRef, next);
+          const refreshed = yield* provider.refresh;
+          assert.deepStrictEqual(
+            refreshed.usageLimits?.extraUsage,
+            oldSnapshot.usageLimits?.extraUsage,
+          );
+          assert.deepStrictEqual(refreshed.usageLimits?.credits, oldSnapshot.usageLimits?.credits);
+          assert.deepStrictEqual(
+            refreshed.usageLimits?.windows,
+            failed ? oldSnapshot.usageLimits?.windows : next.usageLimits?.windows,
+          );
+          assert.strictEqual(
+            refreshed.usageLimits?.checkedAt,
+            failed ? quotaAt : next.usageLimits?.checkedAt,
+          );
+          if (failed) {
+            assert.deepStrictEqual(
+              refreshed.usageLimits?.resetCredits,
+              oldSnapshot.usageLimits?.resetCredits,
+            );
+            assert.strictEqual(refreshed.auth.workspaceId, "org-a");
+          }
         }),
       ).pipe(Effect.provide(layerAlwaysRunTest)),
   );
@@ -804,9 +1067,10 @@ describe("makeManagedServerProvider", () => {
                   }
                 : {
                     ...refreshedSnapshotSecond,
-                    ...(count === 3
-                      ? { auth: { ...refreshedSnapshotSecond.auth, workspaceId: "ws-b" } }
-                      : {}),
+                    auth: {
+                      ...refreshedSnapshotSecond.auth,
+                      workspaceId: count === 3 ? "ws-b" : "ws-a",
+                    },
                     usageLimits: {
                       checkedAt: "2026-04-10T00:00:03.000Z",
                       windows: [],

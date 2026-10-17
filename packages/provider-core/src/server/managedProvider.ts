@@ -160,24 +160,43 @@ export const makeManagedServerProvider = Effect.fn("makeManagedServerProvider")(
         const generation = input.enrichSnapshot
           ? state.enrichmentGeneration + 1
           : state.enrichmentGeneration;
-        // A failed read keeps the last good limits only for the same account,
-        // and they keep the workspace they were read for.
+        // Email can span organizations. Account evidence requires a
+        // verified workspace or credential, with no conflicting identity.
         const previous = state.snapshot.auth;
+        const next = probedSnapshot.auth;
         const differs = (a: string | undefined, b: string | undefined) =>
           a !== undefined && b !== undefined && a !== b;
+        const matches = (a: string | undefined, b: string | undefined) =>
+          a !== undefined && a === b;
         const switchedAccount =
-          differs(probedSnapshot.auth.email?.toLowerCase(), previous.email?.toLowerCase()) ||
-          (probedSnapshot.auth.workspaceId !== undefined &&
-            probedSnapshot.auth.workspaceId !== previous.workspaceId);
-        const usageLimits = switchedAccount
-          ? probedSnapshot.usageLimits
-          : resolveUsageLimitsAfterProbe({
+          differs(next.email?.toLowerCase(), previous.email?.toLowerCase()) ||
+          differs(next.workspaceId, previous.workspaceId) ||
+          differs(
+            probedSnapshot.usageLimits?.credentialFingerprint,
+            state.snapshot.usageLimits?.credentialFingerprint,
+          );
+        const sameAccount =
+          !switchedAccount &&
+          next.status !== "unauthenticated" &&
+          previous.status !== "unauthenticated" &&
+          ((next.status === "authenticated" &&
+            previous.status === "authenticated" &&
+            matches(next.workspaceId, previous.workspaceId)) ||
+            matches(
+              probedSnapshot.usageLimits?.credentialFingerprint,
+              state.snapshot.usageLimits?.credentialFingerprint,
+            ));
+        const usageLimits = sameAccount
+          ? resolveUsageLimitsAfterProbe({
               published: state.snapshot.usageLimits,
               probed: probedSnapshot.usageLimits,
               publishedCheckedAt: state.usageLimitsCheckedAt,
-            });
+            })
+          : probedSnapshot.usageLimits;
         const workspaceId =
-          usageLimits === probedSnapshot.usageLimits ? undefined : state.snapshot.auth.workspaceId;
+          sameAccount && probedSnapshot.usageLimits?.unavailable?.reason === "probeFailed"
+            ? previous.workspaceId
+            : undefined;
         const snapshot = withUsageLimits(
           workspaceId && !probedSnapshot.auth.workspaceId
             ? { ...probedSnapshot, auth: { ...probedSnapshot.auth, workspaceId } }
@@ -192,7 +211,7 @@ export const makeManagedServerProvider = Effect.fn("makeManagedServerProvider")(
             usageLimitsCheckedAt:
               !usageLimits?.windows.length || usageLimits.unavailable
                 ? undefined
-                : !switchedAccount && usageLimits === state.snapshot.usageLimits
+                : sameAccount && usageLimits === state.snapshot.usageLimits
                   ? state.usageLimitsCheckedAt
                   : usageLimits?.checkedAt,
           },

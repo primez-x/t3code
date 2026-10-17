@@ -333,8 +333,8 @@ export function collectLimitAccounts(presentations: LimitPresentations): readonl
         if (limitsNotice(account.usageLimits) !== null) continue;
         const key = `${source.id}:${account.id}${account.workspaceId ? `:${account.workspaceId}` : ""}`;
         const resolved = resolveKey(account);
-        const displayKey =
-          !resolved && labelEnvironment && account.email?.trim() ? `${environmentId}:${key}` : key;
+        // Source IDs and filenames are environment-local without verified account identity.
+        const displayKey = !resolved && labelEnvironment ? `${environmentId}:${key}` : key;
         merge(resolved ?? displayKey, {
           key: displayKey,
           driver: account.driver,
