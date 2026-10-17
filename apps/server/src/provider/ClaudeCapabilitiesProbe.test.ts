@@ -306,6 +306,7 @@ it.layer(NodeServices.layer)("Claude capability probe SDK boundary", (it) => {
           rate_limits_available: true,
           rate_limits: { five_hour: { utilization: 12, resets_at: "2026-07-18T14:39:00Z" } },
         },
+        usageCheckedAt: "1970-01-01T00:00:00.000Z",
       });
 
       const invocation = JSON.parse(yield* fs.readFileString(invocationPath)) as {
@@ -386,5 +387,37 @@ it.effect("asks for usage without the local transcript scan", () =>
     yield* Effect.addFinalizer(() => Effect.sync(() => query.mockRestore()));
     yield* probeClaudeCapabilities(decodeClaudeSettings({ binaryPath: "claude" }));
     assert.deepEqual(usageOptions, { skipBehaviors: true });
+  }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);
+
+it.effect("observes usage at request start before a delayed response", () =>
+  Effect.gen(function* () {
+    const usageStarted = yield* Deferred.make<void>();
+    let completeUsage!: (response: ClaudeSdk.SDKControlGetUsageResponse) => void;
+    const response = new Promise<ClaudeSdk.SDKControlGetUsageResponse>((resolve) => {
+      completeUsage = resolve;
+    });
+    const query = vi.spyOn(ClaudeSdk, "query").mockImplementation(
+      () =>
+        ({
+          initializationResult: async () => ({ commands: [] }),
+          usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET: () => {
+            Deferred.doneUnsafe(usageStarted, Effect.void);
+            return response;
+          },
+        }) as unknown as ReturnType<typeof ClaudeSdk.query>,
+    );
+    yield* Effect.addFinalizer(() => Effect.sync(() => query.mockRestore()));
+    const probe = yield* probeClaudeCapabilities(
+      decodeClaudeSettings({ binaryPath: "claude" }),
+    ).pipe(Effect.forkChild);
+    yield* Deferred.await(usageStarted);
+    yield* TestClock.adjust("1 second");
+    completeUsage({
+      rate_limits_available: true,
+      rate_limits: null,
+    } as ClaudeSdk.SDKControlGetUsageResponse);
+    const capabilities = yield* Fiber.join(probe);
+    assert.equal(capabilities?.usageCheckedAt, "1970-01-01T00:00:00.000Z");
   }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
 );

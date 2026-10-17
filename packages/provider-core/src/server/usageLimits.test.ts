@@ -210,6 +210,46 @@ describe("applyUsageLimitsUpdate", () => {
 });
 
 describe("resolveUsageLimitsAfterProbe", () => {
+  test("keeps live windows when an older probe completes with updated metadata", () => {
+    const current = {
+      ...published,
+      checkedAt: "2026-09-03T12:06:00.000Z",
+      windows: [{ ...session, usedPercent: 95 }, weekly],
+      resetCredits: { availableCount: 2 },
+      credentialFingerprint: "account-a",
+    };
+    const probed = {
+      ...published,
+      checkedAt: "2026-09-03T12:05:00.000Z",
+      resetCredits: { availableCount: 1 },
+      credentialFingerprint: "account-a",
+      credits: { checkedAt: "2026-09-03T12:07:00.000Z", hasCredits: true, unlimited: false },
+    };
+    expect(resolveUsageLimitsAfterProbe({ published: current, probed })).toEqual({
+      ...probed,
+      checkedAt: current.checkedAt,
+      windows: current.windows,
+    });
+    expect(
+      resolveUsageLimitsAfterProbe({
+        published: current,
+        probed: { ...probed, credentialFingerprint: "account-b" },
+      }),
+    ).toEqual({ ...probed, credentialFingerprint: "account-b" });
+  });
+
+  test.each(["2026-09-03T12:06:00.000Z", "2026-09-03T12:07:00.000Z"])(
+    "replaces windows with resets and corrections from a probe observed at %s",
+    (timestamp) => {
+      const current = { ...published, checkedAt: "2026-09-03T12:06:00.000Z" };
+      const probed = {
+        checkedAt: timestamp,
+        windows: [{ ...session, usedPercent: 0, resetsAt: "2026-09-03T19:00:00.000Z" }],
+      };
+      expect(resolveUsageLimitsAfterProbe({ published: current, probed })).toBe(probed);
+    },
+  );
+
   test("keeps newer paid observations when an older probe completes later", () => {
     const timestamp = "2026-09-03T12:06:00.000Z";
     const credits = { checkedAt: timestamp, hasCredits: true, unlimited: false };

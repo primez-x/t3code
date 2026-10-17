@@ -40,6 +40,7 @@ import { applyServerSettingsPatch } from "@t3tools/shared/serverSettings";
 
 import { checkCodexProviderStatus, type CodexAppServerProviderSnapshot } from "./CodexProvider.ts";
 import { checkClaudeProviderStatus } from "./ClaudeProvider.ts";
+import { makeClaudeScopedLimitNames } from "./claudeUsageLimits.ts";
 import * as BackgroundPolicy from "../background/BackgroundPolicy.ts";
 import * as AntigravityInstallation from "./AntigravityInstallation.ts";
 import * as ModelManifest from "./ModelManifest.ts";
@@ -3095,6 +3096,59 @@ it.layer(
   });
 
   describe("checkClaudeProviderStatus", () => {
+    it.effect("keeps cached usage observation time across status refreshes and scoped names", () =>
+      Effect.gen(function* () {
+        const usageCheckedAt = "1970-01-01T00:00:00.000Z";
+        const cachedCapabilities = () =>
+          Effect.succeed({
+            email: undefined,
+            subscriptionType: "max",
+            tokenSource: "oauth",
+            apiKeySource: undefined,
+            apiProvider: undefined,
+            slashCommands: [],
+            usageCheckedAt,
+            usage: {
+              rate_limits_available: true,
+              rate_limits: { five_hour: { utilization: 84, resets_at: null } },
+            },
+          });
+        const names = yield* makeClaudeScopedLimitNames;
+        for (const scopedNames of [undefined, names]) {
+          const first = yield* checkClaudeProviderStatus(
+            defaultClaudeSettings,
+            cachedCapabilities,
+            undefined,
+            undefined,
+            undefined,
+            scopedNames,
+          );
+          yield* TestClock.adjust("1 minute");
+          const refreshed = yield* checkClaudeProviderStatus(
+            defaultClaudeSettings,
+            cachedCapabilities,
+            undefined,
+            undefined,
+            undefined,
+            scopedNames,
+          );
+          assert.notStrictEqual(refreshed.checkedAt, first.checkedAt);
+          assert.strictEqual(first.usageLimits?.checkedAt, usageCheckedAt);
+          assert.strictEqual(refreshed.usageLimits?.checkedAt, usageCheckedAt);
+          assert.deepStrictEqual(refreshed.usageLimits?.windows, first.usageLimits?.windows);
+        }
+      }).pipe(
+        Effect.provide(
+          layerMockSpawner((args) => {
+            if (args.join(" ") === "--version") {
+              return { stdout: "2.1.288\n", stderr: "", code: 0 };
+            }
+            throw new Error(`Unexpected args: ${args.join(" ")}`);
+          }),
+        ),
+      ),
+    );
+
     it.effect("returns ready when claude is installed and authenticated", () =>
       Effect.gen(function* () {
         const status = yield* checkClaudeProviderStatus(

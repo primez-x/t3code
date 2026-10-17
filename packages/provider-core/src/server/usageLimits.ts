@@ -158,9 +158,11 @@ export function resolveUsageLimitsAfterProbe(input: {
     return published;
   }
   if (!published || !probed || probed.unavailable || changedAccount) return probed;
+  const observed =
+    latestObservation(published.unavailable ? undefined : published, probed) ?? probed;
   const credits = latestObservation(published.credits, probed.credits);
   const extraUsage = latestObservation(published.extraUsage, probed.extraUsage);
-  return credits === probed.credits && extraUsage === probed.extraUsage
+  return observed === probed && credits === probed.credits && extraUsage === probed.extraUsage
     ? probed
-    : { ...probed, credits, extraUsage };
+    : { ...probed, checkedAt: observed.checkedAt, windows: observed.windows, credits, extraUsage };
 }
