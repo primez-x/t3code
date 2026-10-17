@@ -155,21 +155,32 @@ function quotaFor(
     headroomPercent = Math.min(headroomPercent, 100 - window.usedPercent);
   }
   if (incomplete && headroomPercent !== 0) return unknownQuota;
+  const fresh = (timestamp: string | undefined) => {
+    const observed = Date.parse(timestamp ?? "");
+    return Number.isFinite(observed) && observed <= nowMs && nowMs - observed <= 300_000;
+  };
   const credits = limits.credits;
-  const creditsCheckedMs = Date.parse(credits?.checkedAt ?? "");
-  const usesCredits =
-    headroomPercent === 0 &&
-    !modelExhausted &&
-    provider.driver === "codex" &&
-    allowCredits &&
+  const extraUsage = limits.extraUsage;
+  const extraAvailable =
+    extraUsage?.enabled === true &&
+    extraUsage.available === true &&
+    fresh(extraUsage.checkedAt) &&
+    (extraUsage.usedPercent === undefined ||
+      (Number.isFinite(extraUsage.usedPercent) &&
+        extraUsage.usedPercent >= 0 &&
+        extraUsage.usedPercent < 100));
+  const creditsAvailable =
     credits !== undefined &&
-    Number.isFinite(creditsCheckedMs) &&
-    creditsCheckedMs <= nowMs &&
-    nowMs - creditsCheckedMs <= 300_000 &&
+    fresh(credits.checkedAt) &&
     (credits.unlimited ||
       (credits.hasCredits &&
         (credits.balance === undefined ||
           (Number.isFinite(Number(credits.balance)) && Number(credits.balance) > 0))));
+  const usesCredits =
+    headroomPercent === 0 &&
+    allowCredits &&
+    ((!modelExhausted && creditsAvailable) ||
+      (extraAvailable && (!modelExhausted || extraUsage.coversModelLimits)));
   return {
     headroomPercent,
     usageCheckedAt: limits.checkedAt,

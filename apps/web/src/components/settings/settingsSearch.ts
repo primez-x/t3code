@@ -385,7 +385,9 @@ export const SETTINGS_SEARCH_ITEMS = [
     title: "Allow credits",
     to: "/settings/general",
     scope: "environment-defaults",
-    searchTerms: ["delegation codex paid credits balance subscription limits exhausted"],
+    searchTerms: [
+      "delegation codex claude paid credits extra usage balance subscription limits exhausted",
+    ],
   },
   {
     id: "time-format",

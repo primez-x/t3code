@@ -12,6 +12,7 @@ import {
   type LimitPoolMember,
   type LimitPoolWindow,
   formatCredits,
+  formatExtraUsage,
   remainingPercent,
 } from "@t3tools/shared/usageLimits";
 import { AlertTriangleIcon, ExternalLinkIcon, TicketIcon } from "lucide-react";
@@ -182,9 +183,12 @@ function SegmentPopover({
           <Row label="Restores">+{reset.restoresPercent}% of pool</Row>
         ) : null}
       </div>
-      {account.limits.credits ? (
-        <div className="border-t border-border/60 pt-2.5 text-muted-foreground tabular-nums">
-          {formatCredits(account.limits.credits)}
+      {account.limits.credits || account.limits.extraUsage ? (
+        <div className="flex flex-col gap-1 border-t border-border/60 pt-2.5 text-muted-foreground tabular-nums">
+          {account.limits.credits ? <span>{formatCredits(account.limits.credits)}</span> : null}
+          {account.limits.extraUsage ? (
+            <span>{formatExtraUsage(account.limits.extraUsage)}</span>
+          ) : null}
         </div>
       ) : null}
       {credits && redeem ? (

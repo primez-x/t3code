@@ -54,7 +54,9 @@ export function applyUsageLimitsUpdate(input: {
 }): ServerProviderUsageLimits | undefined {
   const { previous, update } = input;
   if (
-    (update.windows.length === 0 && update.credits === undefined) ||
+    (update.windows.length === 0 &&
+      update.credits === undefined &&
+      update.extraUsage === undefined) ||
     previous?.unavailable?.reason === "unsupported"
   ) {
     return previous;
@@ -64,10 +66,16 @@ export function applyUsageLimitsUpdate(input: {
   // always with unchanged numbers. Decide "nothing changed" per window on
   // the way through so the no-op case never allocates a new snapshot.
   const credits = update.credits === undefined ? previous?.credits : (update.credits ?? undefined);
+  const extraUsage =
+    update.extraUsage === undefined ? previous?.extraUsage : (update.extraUsage ?? undefined);
   let changed =
     credits?.hasCredits !== previous?.credits?.hasCredits ||
     credits?.unlimited !== previous?.credits?.unlimited ||
-    credits?.balance !== previous?.credits?.balance;
+    credits?.balance !== previous?.credits?.balance ||
+    extraUsage?.enabled !== previous?.extraUsage?.enabled ||
+    extraUsage?.available !== previous?.extraUsage?.available ||
+    extraUsage?.usedPercent !== previous?.extraUsage?.usedPercent ||
+    extraUsage?.coversModelLimits !== previous?.extraUsage?.coversModelLimits;
   for (const window of update.windows) {
     const existing = merged.get(window.id);
     const next: ServerProviderUsageWindow = {
@@ -96,6 +104,7 @@ export function applyUsageLimitsUpdate(input: {
     }),
     ...(previous?.resetCredits !== undefined ? { resetCredits: previous.resetCredits } : {}),
     ...(credits !== undefined ? { credits } : {}),
+    ...(extraUsage !== undefined ? { extraUsage } : {}),
   };
 }
 

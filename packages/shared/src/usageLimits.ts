@@ -17,6 +17,24 @@ const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;
 const DAY = 24 * HOUR;
 
+export function formatExtraUsage(
+  extra: NonNullable<ServerProviderUsageLimits["extraUsage"]>,
+): string {
+  const status =
+    extra.enabled === false
+      ? "Extra usage disabled"
+      : extra.available === false
+        ? "Extra usage unavailable"
+        : extra.available === true
+          ? "Extra usage available"
+          : extra.enabled === true
+            ? "Extra usage enabled · available balance unknown"
+            : "Extra usage status unknown";
+  return extra.usedPercent === undefined
+    ? status
+    : `${status} · ${Math.round(extra.usedPercent)}% of monthly limit used`;
+}
+
 export function formatCredits(credits: NonNullable<ServerProviderUsageLimits["credits"]>): string {
   if (credits.unlimited) return "Unlimited credits";
   if (credits.balance !== undefined) return `Credits: ${credits.balance}`;
@@ -172,10 +190,18 @@ export interface LimitAccount {
   readonly limits: ServerProviderUsageLimits;
 }
 
+function latestObservation<T extends { readonly checkedAt: string }>(
+  current: T | undefined,
+  next: T | undefined,
+): T | undefined {
+  return next && (!current || Date.parse(next.checkedAt) > Date.parse(current.checkedAt))
+    ? next
+    : current;
+}
+
 export function collectLimitAccounts(presentations: LimitPresentations): readonly LimitAccount[] {
   const accounts = new Map<string, LimitAccount>();
   const creditSources = new Map<string, LimitAccount>();
-  const paidCreditSources = new Map<string, NonNullable<ServerProviderUsageLimits["credits"]>>();
   const hubRedeems = new Map<string, LimitAccount>();
   const merge = (key: string, next: LimitAccount) => {
     // Redeeming through a hub also clears the routing cooldown that hub holds
@@ -198,14 +224,6 @@ export function collectLimitAccounts(presentations: LimitPresentations): readonl
         Date.parse(next.limits.checkedAt) > Date.parse(previousCredit.limits.checkedAt))
     ) {
       creditSources.set(key, next);
-    }
-    const previousPaidCredits = paidCreditSources.get(key);
-    if (
-      next.limits.credits &&
-      (!previousPaidCredits ||
-        Date.parse(next.limits.credits.checkedAt) > Date.parse(previousPaidCredits.checkedAt))
-    ) {
-      paidCreditSources.set(key, next.limits.credits);
     }
     const previous = accounts.get(key);
     if (!previous) {
@@ -234,7 +252,8 @@ export function collectLimitAccounts(presentations: LimitPresentations): readonl
         (creditSource ? creditSource.redeem : (winner.redeem ?? previous.redeem ?? next.redeem)),
       limits: {
         ...winner.limits,
-        ...(paidCreditSources.has(key) ? { credits: paidCreditSources.get(key) } : {}),
+        credits: latestObservation(previous.limits.credits, next.limits.credits),
+        extraUsage: latestObservation(previous.limits.extraUsage, next.limits.extraUsage),
         ...(creditSource?.limits.resetCredits
           ? { resetCredits: creditSource.limits.resetCredits }
           : { resetCredits: undefined }),

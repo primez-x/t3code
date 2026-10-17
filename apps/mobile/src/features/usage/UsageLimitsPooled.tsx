@@ -10,6 +10,7 @@ import {
   displayLimitWindows,
   formatResetsIn,
   formatCredits,
+  formatExtraUsage,
   remainingPercent,
   type LimitAccount,
   type LimitPoolWindow,
@@ -439,6 +440,14 @@ export function UsageLimitAccountScreen({ route }: AccountScreenProps) {
                 <Text className="text-sm font-t3-medium text-foreground">Credits</Text>
                 <Text className="text-sm text-foreground-muted">
                   {formatCredits(account.limits.credits)}
+                </Text>
+              </View>
+            ) : null}
+            {account.limits.extraUsage ? (
+              <View className="gap-2 rounded-[24px] border-continuous bg-grouped-card p-4">
+                <Text className="text-sm font-t3-medium text-foreground">Extra usage</Text>
+                <Text className="text-sm text-foreground-muted">
+                  {formatExtraUsage(account.limits.extraUsage)}
                 </Text>
               </View>
             ) : null}

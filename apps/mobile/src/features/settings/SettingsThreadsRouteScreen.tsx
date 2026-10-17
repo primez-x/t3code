@@ -128,7 +128,7 @@ function DelegationSettingsRows() {
         <SettingsSwitchRow
           icon="clock"
           label="Usage balance"
-          subtitle="Favor capable models with more usage available. When off, remaining usage does not rank choices. Exhausted models remain excluded."
+          subtitle="Favor capable models with more usage available. When off, remaining usage does not rank choices. Models with exhausted quotas need allowed, available paid usage."
           value={uniform("balanceUsage")}
           disabled={disabled}
           onValueChange={(balanceUsage) => writeToAll({ balanceUsage })}
@@ -144,7 +144,7 @@ function DelegationSettingsRows() {
         <SettingsSwitchRow
           icon="ticket"
           label="Allow credits"
-          subtitle="Allows delegated Codex tasks after subscription limits when paid credits are available. Off excludes exhausted Codex models."
+          subtitle="Allow delegated tasks to use available credits or extra usage after subscription limits. Off excludes models with exhausted quotas."
           value={uniform("allowCredits")}
           disabled={disabled}
           onValueChange={(allowCredits) => writeToAll({ allowCredits })}

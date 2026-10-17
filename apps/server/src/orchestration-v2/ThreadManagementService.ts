@@ -831,16 +831,21 @@ const make = Effect.gen(function* () {
         )
           return false;
         const observedMs = Date.parse(provider.usageLimits?.checkedAt ?? "");
-        const creditObservedMs = Date.parse(provider.usageLimits?.credits?.checkedAt ?? "");
+        const paidObservations = [
+          provider.usageLimits?.credits?.checkedAt,
+          provider.usageLimits?.extraUsage?.checkedAt,
+        ];
         const needsCreditRefresh =
           policy.allowCredits &&
-          provider.driver === "codex" &&
-          provider.usageLimits?.windows.some(
-            (window) => window.modelFamily === undefined && window.usedPercent === 100,
-          ) &&
-          (!Number.isFinite(creditObservedMs) ||
-            creditObservedMs > staleCheckMs ||
-            staleCheckMs - creditObservedMs > 300_000);
+          provider.usageLimits?.windows.some((window) => window.usedPercent === 100) &&
+          !paidObservations.some((timestamp) => {
+            const observed = Date.parse(timestamp ?? "");
+            return (
+              Number.isFinite(observed) &&
+              observed <= staleCheckMs &&
+              staleCheckMs - observed <= 300_000
+            );
+          });
         return (
           needsCreditRefresh ||
           !Number.isFinite(observedMs) ||

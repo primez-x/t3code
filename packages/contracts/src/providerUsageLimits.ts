@@ -40,6 +40,15 @@ const ProviderCredits = Schema.Struct({
   balance: Schema.optional(TrimmedNonEmptyString),
 });
 
+const ProviderExtraUsage = Schema.Struct({
+  checkedAt: IsoDateTime,
+  enabled: Schema.NullOr(Schema.Boolean),
+  available: Schema.NullOr(Schema.Boolean),
+  /** Monthly budget utilization does not establish a prepaid balance. */
+  usedPercent: Schema.optional(Schema.Number.check(Schema.isBetween({ minimum: 0, maximum: 100 }))),
+  coversModelLimits: Schema.Boolean,
+});
+
 /**
  * `unavailable` distinguishes an account that can never report windows (API
  * key, Bedrock) from a probe that failed this time, so clients can keep the
@@ -51,6 +60,7 @@ export const ServerProviderUsageLimits = Schema.Struct({
   credentialFingerprint: Schema.optional(TrimmedNonEmptyString),
   resetCredits: Schema.optional(ServerProviderResetCredits),
   credits: Schema.optional(ProviderCredits),
+  extraUsage: Schema.optional(ProviderExtraUsage),
   externalUsage: Schema.optional(
     Schema.Struct({
       label: TrimmedNonEmptyString,
@@ -74,6 +84,7 @@ export type ServerProviderUsageLimits = typeof ServerProviderUsageLimits.Type;
 export const ProviderUsageLimitsUpdate = Schema.Struct({
   windows: Schema.Array(ServerProviderUsageWindow),
   credits: Schema.optional(Schema.NullOr(ProviderCredits)),
+  extraUsage: Schema.optional(Schema.NullOr(ProviderExtraUsage)),
 });
 export type ProviderUsageLimitsUpdate = typeof ProviderUsageLimitsUpdate.Type;
 

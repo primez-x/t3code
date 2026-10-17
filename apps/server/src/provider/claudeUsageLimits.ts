@@ -125,16 +125,57 @@ function makeWindow(
 export function claudeRateLimitEventToUpdate(
   info: SDKRateLimitInfo,
   names: ClaudeScopedLimitNames,
+  checkedAt: string,
 ): ProviderUsageLimitsUpdate | undefined {
   const type = info.rateLimitType;
-  if (!type || !isUtilization(info.utilization)) return undefined;
-  const usedPercent = Math.min(1, info.utilization) * 100;
+  const usedPercent = isUtilization(info.utilization)
+    ? Math.min(1, info.utilization) * 100
+    : undefined;
   const resetsAt = isoFromEpochSeconds(info.resetsAt);
   const window =
-    type === OVERAGE_INCLUDED_EVENT_TYPE && names.overageIncluded
-      ? scopedWindow(names.overageIncluded, usedPercent, resetsAt)
-      : makeWindow(type, usedPercent, resetsAt);
-  return window ? { windows: [window] } : undefined;
+    type && usedPercent !== undefined
+      ? type === OVERAGE_INCLUDED_EVENT_TYPE && names.overageIncluded
+        ? scopedWindow(names.overageIncluded, usedPercent, resetsAt)
+        : makeWindow(type, usedPercent, resetsAt)
+      : undefined;
+  const reason = info.overageDisabledReason;
+  const failed = reason === "fetch_error" || reason === "unknown";
+  const disabled = reason !== undefined && !failed && reason !== "out_of_credits";
+  const rejected =
+    info.overageStatus === "rejected" || (type === "overage" && info.status === "rejected");
+  const allowed =
+    info.overageStatus === "allowed" ||
+    info.overageStatus === "allowed_warning" ||
+    info.isUsingOverage === true ||
+    info.overageInUse === true ||
+    (type === "overage" && info.status !== "rejected");
+  const hasExtraUsage =
+    reason !== undefined || info.overageStatus !== undefined || allowed || type === "overage";
+  if (!window && !hasExtraUsage) return undefined;
+  return {
+    windows: window ? [window] : [],
+    ...(hasExtraUsage
+      ? {
+          extraUsage: {
+            checkedAt,
+            enabled: disabled ? false : failed || !allowed ? null : true,
+            available:
+              disabled ||
+              reason === "out_of_credits" ||
+              rejected ||
+              (type === "overage" && usedPercent === 100)
+                ? false
+                : failed
+                  ? null
+                  : allowed
+                    ? true
+                    : null,
+            coversModelLimits: true,
+            ...(type === "overage" && usedPercent !== undefined ? { usedPercent } : {}),
+          },
+        }
+      : {}),
+  };
 }
 
 /** Probe utilization already uses percentages. */
@@ -179,7 +220,33 @@ export function claudeUsageResponseToLimits(input: {
   const overageIncluded =
     fableNames.length === 1 ? fableNames[0] : scopedNames.length === 1 ? scopedNames[0] : undefined;
   return {
-    limits: makeUsageLimits({ checkedAt, windows }),
+    limits: {
+      ...makeUsageLimits({ checkedAt, windows }),
+      ...(response.rate_limits.extra_usage
+        ? {
+            extraUsage: {
+              checkedAt,
+              enabled: response.rate_limits.extra_usage.is_enabled,
+              // A remaining spend cap does not prove that prepaid funds are available.
+              available:
+                !response.rate_limits.extra_usage.is_enabled ||
+                response.rate_limits.extra_usage.monthly_limit === 0 ||
+                (isUtilization(response.rate_limits.extra_usage.utilization) &&
+                  response.rate_limits.extra_usage.utilization >= 100) ||
+                (isUtilization(response.rate_limits.extra_usage.monthly_limit) &&
+                  isUtilization(response.rate_limits.extra_usage.used_credits) &&
+                  response.rate_limits.extra_usage.used_credits >=
+                    response.rate_limits.extra_usage.monthly_limit)
+                  ? false
+                  : null,
+              coversModelLimits: true,
+              ...(isUtilization(response.rate_limits.extra_usage.utilization)
+                ? { usedPercent: clampPercent(response.rate_limits.extra_usage.utilization) }
+                : {}),
+            },
+          }
+        : {}),
+    },
     names: { overageIncluded },
   };
 }

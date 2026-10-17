@@ -92,9 +92,12 @@ Claude resets are not available when the server runs on macOS, where Claude keep
 Keychain. On narrow screens, numbered rows below
 the bar show each account's quota, countdown, and credits. Tap a row to open its details.
 
-Codex account details and `/usage-limits` also show paid credits, separate from reset credits.
-Enable **Allow credits** in delegation settings to keep Codex available after subscription limits
-when paid credits are available. The setting defaults to off. Subscription percentages stay unchanged.
+Account details and `/usage-limits` show reported paid credits and extra usage, separate from reset credits.
+Codex reports credit balances. Claude reports extra-usage status and monthly budget use.
+An enabled Claude monthly budget does not confirm an available prepaid balance.
+Enable **Allow credits** in delegation settings to allow confirmed available paid usage after subscription limits.
+The setting defaults to off. Subscription percentages stay unchanged.
+Providers without verified paid-usage data cannot bypass exhausted quotas.
 
 The same account signed in on more than one environment, or reported by a hub as well, counts once.
 Filter with the environment dropdown to see what a single machine has.

@@ -2424,7 +2424,7 @@ export function GeneralSettingsPanel() {
           mixed={mixedDelegationUsage}
           serverScoped
           settingKeys={["delegationPolicy"]}
-          description="Favor capable models with more usage available. When off, remaining usage does not rank choices. Exhausted models remain excluded."
+          description="Favor capable models with more usage available. When off, remaining usage does not rank choices. Models with exhausted quotas need allowed, available paid usage."
           control={
             <Switch
               mixed={mixedDelegationUsage}
@@ -2462,7 +2462,7 @@ export function GeneralSettingsPanel() {
           mixed={mixedDelegationCredits}
           serverScoped
           settingKeys={["delegationPolicy"]}
-          description="Allows delegated Codex tasks after subscription limits when paid credits are available. Off excludes exhausted Codex models."
+          description="Allow delegated tasks to use available credits or extra usage after subscription limits. Off excludes models with exhausted quotas."
           control={
             <Switch
               mixed={mixedDelegationCredits}

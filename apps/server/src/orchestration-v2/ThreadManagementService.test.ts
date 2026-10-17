@@ -2211,6 +2211,101 @@ it.effect(
 );
 
 it.effect(
+  "delegation refreshes stale Claude paid usage even when subscription windows are fresh",
+  () => {
+    const commands: Array<OrchestrationV2Command> = [];
+    const refreshed: Array<ProviderInstanceId> = [];
+    const checkedAt = "1970-01-01T00:10:00.000Z";
+    const extraUsage = {
+      checkedAt: "1970-01-01T00:00:00.000Z",
+      enabled: true,
+      available: false,
+      coversModelLimits: true,
+    };
+    const provider: ServerProvider = {
+      ...delegationProvider,
+      driver: ProviderDriverKind.make("claudeAgent"),
+      models: [
+        {
+          ...delegationProvider.models[0]!,
+          slug: "claude-sonnet-5-1",
+          capabilities: {
+            optionDescriptors: [
+              {
+                id: "effort",
+                label: "Effort",
+                type: "select",
+                options: [{ id: "high", label: "High" }],
+              },
+            ],
+          },
+        },
+      ],
+      usageLimits: {
+        checkedAt,
+        extraUsage,
+        windows: [
+          {
+            id: "primary",
+            label: "Session",
+            kind: "session",
+            usedPercent: 100,
+            resetsAt: "1970-01-01T01:00:00.000Z",
+          },
+        ],
+      },
+    };
+    return Effect.gen(function* () {
+      yield* TestClock.adjust(Duration.minutes(10));
+      const threads = yield* ThreadManagementService.ThreadManagementService;
+      yield* threads.dispatch(delegationCommand());
+      expect(refreshed).toEqual([provider.instanceId]);
+      expect(commands[0]).toMatchObject({
+        modelSelection: { instanceId: provider.instanceId },
+        routingDecision: { headroomPercent: 0, usesCredits: true },
+      });
+    }).pipe(
+      Effect.provide(
+        layerDelegationTest(
+          commands,
+          [provider],
+          true,
+          "t3-managed",
+          [
+            {
+              driver: ProviderDriverKind.make("claudeAgent"),
+              model: "claude-sonnet-5-1",
+              effort: "high",
+              capabilities: ["coding"],
+              costPerTask: 0.1,
+            },
+          ],
+          [provider.instanceId],
+          new Map(),
+          [],
+          {},
+          (instanceId) =>
+            Effect.sync(() => {
+              refreshed.push(instanceId);
+              return [
+                {
+                  ...provider,
+                  usageLimits: {
+                    ...provider.usageLimits!,
+                    extraUsage: { ...extraUsage, checkedAt, available: true },
+                  },
+                },
+              ];
+            }),
+          undefined,
+          true,
+        ),
+      ),
+    );
+  },
+);
+
+it.effect(
   "delegation retains verified headroom observed after the initial stale-snapshot check",
   () => {
     const commands: Array<OrchestrationV2Command> = [];

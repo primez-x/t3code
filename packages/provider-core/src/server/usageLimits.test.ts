@@ -21,6 +21,43 @@ const weekly = {
 const published = { checkedAt, windows: [session, weekly] };
 
 describe("applyUsageLimitsUpdate", () => {
+  test("merges paid-usage-only observations without refreshing quota windows", () => {
+    const extraUsage = { checkedAt, enabled: true, available: true, coversModelLimits: true };
+    const previous = { ...published, extraUsage };
+    const timestamp = "2026-09-03T12:00:05.000Z";
+    const result = applyUsageLimitsUpdate({
+      previous,
+      checkedAt: timestamp,
+      update: {
+        windows: [],
+        extraUsage: { ...extraUsage, checkedAt: timestamp, available: false },
+      },
+    });
+    expect(result?.checkedAt).toBe(previous.checkedAt);
+    expect(result?.extraUsage?.available).toBe(false);
+    expect(
+      applyUsageLimitsUpdate({
+        previous,
+        checkedAt: timestamp,
+        update: { windows: [], extraUsage: { ...extraUsage, checkedAt: timestamp } },
+      }),
+    ).toBe(previous);
+    expect(
+      applyUsageLimitsUpdate({
+        previous,
+        checkedAt: timestamp,
+        update: { windows: [], extraUsage: null },
+      }),
+    ).not.toHaveProperty("extraUsage");
+    expect(
+      applyUsageLimitsUpdate({
+        previous,
+        checkedAt: timestamp,
+        update: { windows: [{ ...session, usedPercent: 45 }] },
+      })?.extraUsage,
+    ).toEqual(extraUsage);
+  });
+
   test("does not refresh subscription observations with a credit-only change", () => {
     const nextCheckedAt = "2026-09-03T12:10:00.000Z";
     const next = applyUsageLimitsUpdate({

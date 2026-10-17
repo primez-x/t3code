@@ -103,6 +103,56 @@ const selected = (result: ReturnType<typeof select>) => {
 };
 
 describe("selectDelegationTarget", () => {
+  const extraUsage = { checkedAt, enabled: true, available: true, coversModelLimits: true };
+  test("allows Claude's confirmed extra usage for shared and model subscription limits", () => {
+    for (const scoped of [false, true]) {
+      const usageLimits = {
+        ...limits(100),
+        extraUsage,
+        windows: limits(100).windows.map((window) => ({
+          ...window,
+          ...(scoped ? { modelFamily: "claude-fable" } : {}),
+        })),
+      };
+      const funded = {
+        ...claude,
+        models: claude.models.filter((model) => model.slug === "claude-fable-5-1"),
+        usageLimits,
+      };
+      expect(select({ providers: [funded] }).ok).toBe(false);
+      const result = selected(
+        select({ providers: [funded], policy: { ...policy(), allowCredits: true } }),
+      );
+      expect(result.decision).toMatchObject({ headroomPercent: 0, usesCredits: true });
+    }
+  });
+  test.each([
+    { ...extraUsage, available: null },
+    { ...extraUsage, available: false },
+    { ...extraUsage, enabled: false },
+    { ...extraUsage, checkedAt: "2026-10-14T11:00:00Z" },
+    { ...extraUsage, checkedAt: "2026-10-14T12:01:00Z" },
+    { ...extraUsage, usedPercent: 100 },
+  ])("rejects unavailable, disabled, stale, or depleted paid capacity %j", (extraUsage) => {
+    expect(
+      select({
+        providers: [{ ...claude, usageLimits: { ...limits(100), extraUsage } }],
+        policy: { ...policy(), allowCredits: true },
+      }).ok,
+    ).toBe(false);
+  });
+  test("uses normalized credits independently of the provider name", () => {
+    const credits = { checkedAt, hasCredits: true, unlimited: false, balance: "42" };
+    expect(
+      selected(
+        select({
+          providers: [{ ...claude, usageLimits: { ...limits(100), credits } }],
+          policy: { ...policy(), allowCredits: true },
+        }),
+      ).decision.usesCredits,
+    ).toBe(true);
+  });
+
   const paidCredits = { checkedAt, hasCredits: true, unlimited: false, balance: "12500" };
   const exhaustedWithCredits = (credits = paidCredits) => ({
     ...codex,
@@ -177,7 +227,7 @@ describe("selectDelegationTarget", () => {
     ).toBe(false);
   });
 
-  test("does not bypass a model-specific limit or another provider's exhausted quota", () => {
+  test("does not bypass model-specific limits with generic credits", () => {
     const scoped = exhaustedWithCredits();
     scoped.models = scoped.models.filter((model) => model.slug === "gpt-6-sol");
     scoped.usageLimits.windows = [{ ...limits(100).windows[0]!, modelFamily: "gpt-6-sol" }];
@@ -186,12 +236,6 @@ describe("selectDelegationTarget", () => {
         providers: [scoped],
         policy: { ...policy(), allowCredits: true },
         requestedTarget: { model: "gpt-6-sol" },
-      }).ok,
-    ).toBe(false);
-    expect(
-      select({
-        providers: [{ ...claude, usageLimits: { ...limits(100), credits: paidCredits } }],
-        policy: { ...policy(), allowCredits: true },
       }).ok,
     ).toBe(false);
   });

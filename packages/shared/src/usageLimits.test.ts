@@ -98,6 +98,48 @@ it("keeps paid credits from the newest credit observation across duplicate accou
   expect(collectLimitAccounts(presentations)[0]?.limits.credits).toEqual(depleted);
 });
 
+it("keeps extra usage from the newest paid observation across duplicate accounts", () => {
+  const extraUsage = {
+    checkedAt: "2026-09-03T11:50:00.000Z",
+    enabled: true,
+    available: true,
+    coversModelLimits: true,
+  };
+  const native = provider({
+    auth: { status: "authenticated", email: "same@example.com" },
+    usageLimits: { checkedAt: extraUsage.checkedAt, windows: [window], extraUsage },
+  });
+  const other = {
+    ...native,
+    usageLimits: {
+      checkedAt: "2026-09-03T12:01:00.000Z",
+      windows: [window],
+      extraUsage: undefined as typeof extraUsage | undefined,
+    },
+  };
+  const presentations = new Map([
+    [
+      EnvironmentId.make("a"),
+      { entry: { target: { label: "A" } }, serverConfig: { providers: [native] } },
+    ],
+    [
+      EnvironmentId.make("b"),
+      { entry: { target: { label: "B" } }, serverConfig: { providers: [other] } },
+    ],
+  ]);
+  expect(collectLimitAccounts(presentations)[0]?.limits.extraUsage).toEqual(extraUsage);
+  const depleted = {
+    ...extraUsage,
+    checkedAt: "2026-09-03T11:55:00.000Z",
+    available: false,
+  };
+  other.usageLimits = {
+    ...other.usageLimits,
+    extraUsage: depleted,
+  };
+  expect(collectLimitAccounts(presentations)[0]?.limits.extraUsage).toEqual(depleted);
+});
+
 describe("pace", () => {
   it.each([
     ["2026-09-03T12:01:00.000Z", "resets in 1m"],

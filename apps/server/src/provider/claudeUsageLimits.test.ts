@@ -6,6 +6,66 @@ const checkedAt = "2026-07-18T10:00:00.000Z";
 const noNames = { overageIncluded: undefined } as const;
 
 describe("claudeUsageResponseToLimits", () => {
+  test.each([false, true])(
+    "reports extra usage without inventing a prepaid balance (enabled: %s)",
+    (enabled) => {
+      const result = claudeUsageResponseToLimits({
+        checkedAt,
+        response: {
+          rate_limits_available: true,
+          rate_limits: {
+            extra_usage: {
+              is_enabled: enabled,
+              monthly_limit: 5000,
+              used_credits: 1200,
+              utilization: 24,
+              currency: "USD",
+            },
+          },
+        },
+      }).limits;
+      expect(result.extraUsage).toEqual({
+        checkedAt,
+        enabled,
+        available: enabled ? null : false,
+        coversModelLimits: true,
+        usedPercent: 24,
+      });
+      expect(result.credits).toBeUndefined();
+    },
+  );
+  test("rejects a spent or zero extra-usage budget", () => {
+    for (const extra_usage of [
+      { is_enabled: true, monthly_limit: 0, used_credits: 0, utilization: null },
+      { is_enabled: true, monthly_limit: 50, used_credits: 50, utilization: 100 },
+    ]) {
+      expect(
+        claudeUsageResponseToLimits({
+          checkedAt,
+          response: { rate_limits_available: true, rate_limits: { extra_usage } },
+        }).limits.extraUsage?.available,
+      ).toBe(false);
+    }
+  });
+  test("does not treat an uncapped monthly budget as unlimited credits", () => {
+    const result = claudeUsageResponseToLimits({
+      checkedAt,
+      response: {
+        rate_limits_available: true,
+        rate_limits: {
+          extra_usage: {
+            is_enabled: true,
+            monthly_limit: null,
+            used_credits: null,
+            utilization: null,
+          },
+        },
+      },
+    }).limits;
+    expect(result.extraUsage?.available).toBeNull();
+    expect(result.credits).toBeUndefined();
+  });
+
   test("maps the session, weekly, and model-scoped weekly windows", () => {
     expect(
       claudeUsageResponseToLimits({
@@ -37,6 +97,7 @@ describe("claudeUsageResponseToLimits", () => {
       names: { overageIncluded: "Fable" },
       limits: {
         checkedAt,
+        extraUsage: { checkedAt, enabled: false, available: false, coversModelLimits: true },
         windows: [
           {
             id: "five_hour",
@@ -129,6 +190,45 @@ describe("claudeUsageResponseToLimits", () => {
 });
 
 describe("claudeRateLimitEventToUpdate", () => {
+  test.each(["allowed", "allowed_warning"] as const)(
+    "publishes provider-confirmed extra usage without a subscription update: %s",
+    (overageStatus) => {
+      expect(
+        claudeRateLimitEventToUpdate({ status: "allowed", overageStatus }, noNames, checkedAt),
+      ).toEqual({
+        windows: [],
+        extraUsage: { checkedAt, enabled: true, available: true, coversModelLimits: true },
+      });
+    },
+  );
+  test("publishes denied extra usage and unknown state after a failed status read", () => {
+    expect(
+      claudeRateLimitEventToUpdate(
+        { status: "rejected", overageDisabledReason: "out_of_credits" },
+        noNames,
+        checkedAt,
+      )?.extraUsage?.available,
+    ).toBe(false);
+    expect(
+      claudeRateLimitEventToUpdate(
+        { status: "rejected", overageDisabledReason: "fetch_error" },
+        noNames,
+        checkedAt,
+      )?.extraUsage?.available,
+    ).toBeNull();
+    expect(
+      claudeRateLimitEventToUpdate(
+        {
+          status: "allowed",
+          overageStatus: "allowed",
+          overageDisabledReason: "org_level_disabled",
+        },
+        noNames,
+        checkedAt,
+      )?.extraUsage,
+    ).toMatchObject({ enabled: false, available: false });
+  });
+
   test("scales the 0–1 utilization and epoch-second reset onto the probe's window id", () => {
     expect(
       claudeRateLimitEventToUpdate(
@@ -139,6 +239,7 @@ describe("claudeRateLimitEventToUpdate", () => {
           resetsAt: 1_784_000_000,
         },
         noNames,
+        checkedAt,
       ),
     ).toEqual({
       windows: [
@@ -160,12 +261,12 @@ describe("claudeRateLimitEventToUpdate", () => {
       rateLimitType: "seven_day_overage_included" as never,
       utilization: 0.4,
     } as const;
-    expect(claudeRateLimitEventToUpdate(event, noNames)?.windows[0]).toMatchObject({
+    expect(claudeRateLimitEventToUpdate(event, noNames, checkedAt)?.windows[0]).toMatchObject({
       id: "seven_day_overage_included",
       modelFamily: "unrecognized",
       usedPercent: 40,
     });
-    expect(claudeRateLimitEventToUpdate(event, { overageIncluded: "Fable" })).toEqual({
+    expect(claudeRateLimitEventToUpdate(event, { overageIncluded: "Fable" }, checkedAt)).toEqual({
       windows: [
         {
           id: "seven_day_fable",
@@ -184,12 +285,17 @@ describe("claudeRateLimitEventToUpdate", () => {
       claudeRateLimitEventToUpdate(
         { status: "allowed", rateLimitType: "seven_day_opus", utilization: 0.1 },
         noNames,
+        checkedAt,
       ),
     ).toMatchObject({
       windows: [{ id: "seven_day_opus", modelFamily: "claude-opus", usedPercent: 10 }],
     });
     expect(
-      claudeRateLimitEventToUpdate({ status: "rejected", rateLimitType: "five_hour" }, noNames),
+      claudeRateLimitEventToUpdate(
+        { status: "rejected", rateLimitType: "five_hour" },
+        noNames,
+        checkedAt,
+      ),
     ).toBeUndefined();
   });
 });
@@ -249,6 +355,7 @@ describe("Claude quota scopes", () => {
           utilization: 0.9,
         },
         result.names,
+        checkedAt,
       )?.windows[0]?.id,
     ).toBe("seven_day_fable");
     const second = claudeUsageResponseToLimits({
@@ -300,6 +407,7 @@ describe("Claude quota scopes", () => {
         utilization: 1,
       },
       noNames,
+      checkedAt,
     );
     expect(limits.windows).toHaveLength(1);
     expect(limits.windows[0]?.modelFamily).toBe("unrecognized");
@@ -333,6 +441,7 @@ describe("Claude quota scopes", () => {
           utilization: 1,
         },
         names,
+        checkedAt,
       )?.windows[0]?.id,
     ).toBe("seven_day_overage_included");
   });
@@ -389,12 +498,12 @@ describe("Claude quota scopes", () => {
       rateLimitType: "seven_day_overage_included",
       utilization: 0.5,
     } as const;
-    expect(claudeRateLimitEventToUpdate(event, first.names)?.windows[0]?.modelFamily).toBe(
-      "claude-fable",
-    );
-    expect(claudeRateLimitEventToUpdate(event, second.names)?.windows[0]?.modelFamily).toBe(
-      "claude-opus",
-    );
+    expect(
+      claudeRateLimitEventToUpdate(event, first.names, checkedAt)?.windows[0]?.modelFamily,
+    ).toBe("claude-fable");
+    expect(
+      claudeRateLimitEventToUpdate(event, second.names, checkedAt)?.windows[0]?.modelFamily,
+    ).toBe("claude-opus");
   });
 
   test.each([-1, NaN, Infinity])(
@@ -420,6 +529,7 @@ describe("Claude quota scopes", () => {
             utilization: value,
           },
           noNames,
+          checkedAt,
         ),
       ).toBeUndefined();
     },
