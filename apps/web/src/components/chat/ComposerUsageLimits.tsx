@@ -1,5 +1,5 @@
 import type { EnvironmentId, UsageLimitsReport } from "@t3tools/contracts";
-import { limitsNotice } from "@t3tools/shared/usageLimits";
+import { formatCredits, limitsNotice } from "@t3tools/shared/usageLimits";
 import { GaugeIcon } from "lucide-react";
 
 import { ensureLocalApi } from "../../localApi";
@@ -111,6 +111,11 @@ function UsageLimitsBannerBody({
                 >
                   Manage usage
                 </Button>
+              ) : null}
+              {account.limits.credits ? (
+                <span className="text-xs text-muted-foreground tabular-nums">
+                  {formatCredits(account.limits.credits)}
+                </span>
               ) : null}
               {resetCreditInput && account.limits.resetCredits ? (
                 <ResetCredits

@@ -1813,6 +1813,7 @@ const make = Effect.gen(function* () {
           delegationPolicy,
           delegationConstraints: [
             "Delegated effort is capped at xhigh. Fast mode and priority service are forbidden.",
+            "Provider usageLimits exposes subscription windows and paid credits separately. Codex can remain eligible at zero subscription headroom when delegationPolicy.allowCredits is true and fresh credits are available. A routing decision with usesCredits=true keeps headroomPercent as the subscription percentage.",
             delegationPolicy.mode === "t3-managed"
               ? "Omit target for automatic selection. Supply target for an explicit user request in either mode. If a requested target is unavailable or exhausted, T3 selects a capable substitute and records the reason. Report the requested target, selected target, and substitution reason. Native delegation controls apply to Codex, Claude, and Muse only."
               : "T3 applies the policy to automatic targets and validates explicit targets. Native provider delegation remains available.",
@@ -1849,6 +1850,7 @@ const make = Effect.gen(function* () {
             return {
               providerInstanceId: provider.instanceId,
               driverKind: provider.driver,
+              ...(provider.usageLimits === undefined ? {} : { usageLimits: provider.usageLimits }),
               displayName: provider?.displayName ?? null,
               models:
                 provider?.models

@@ -13,6 +13,50 @@ import {
 const checkedAt = "2026-07-18T10:00:00.000Z";
 
 describe("codexRateLimitsToLimits", () => {
+  it("preserves paid credits independently from earned reset credits", () => {
+    const credits = { hasCredits: true, unlimited: false, balance: "12500.50" };
+    expect(
+      codexRateLimitsToLimits({
+        checkedAt,
+        snapshot: { credits, secondary: { usedPercent: 100 } },
+        resetCredits: { availableCount: 2 },
+      }),
+    ).toMatchObject({ credits: { ...credits, checkedAt }, resetCredits: { availableCount: 2 } });
+  });
+
+  it("carries the main allowance credits when the default snapshot describes another model", () => {
+    const credits = { hasCredits: true, unlimited: true, balance: null };
+    expect(
+      codexRateLimitsToLimits({
+        checkedAt,
+        snapshot: { limitId: "codex_bengalfox" },
+        rateLimitsByLimitId: { codex: { credits } },
+      }).credits,
+    ).toEqual({ hasCredits: true, unlimited: true, checkedAt });
+  });
+
+  it("publishes credit-only updates and clears an explicitly absent credit snapshot", () => {
+    const credits = { hasCredits: false, unlimited: false, balance: "0" };
+    expect(codexRateLimitsToUpdate({ credits }, checkedAt)).toEqual({
+      windows: [],
+      credits: { ...credits, checkedAt },
+    });
+    expect(codexRateLimitsToUpdate({ credits: null }, checkedAt)).toEqual({
+      windows: [],
+      credits: null,
+    });
+    expect(codexRateLimitsToUpdate({}, checkedAt)).toBeUndefined();
+  });
+
+  it("merges sparse credit changes without losing the last credit observation", () => {
+    const credits = { hasCredits: true, unlimited: false, balance: "8" };
+    const previous = { credits, secondary: { usedPercent: 100 } };
+    expect(mergeCodexRateLimits(previous, { primary: { usedPercent: 20 } })?.credits).toEqual(
+      credits,
+    );
+    expect(mergeCodexRateLimits(previous, { credits: null })?.credits).toBeNull();
+  });
+
   it("maps primary and secondary onto the session and weekly windows", () => {
     expect(
       codexRateLimitsToLimits({
@@ -115,9 +159,12 @@ describe("codexRateLimitsToLimits", () => {
 describe("codexRateLimitsToUpdate", () => {
   it("carries only the windows the notification names", () => {
     expect(
-      codexRateLimitsToUpdate({
-        secondary: { usedPercent: 51, windowDurationMins: 10080 },
-      }),
+      codexRateLimitsToUpdate(
+        {
+          secondary: { usedPercent: 51, windowDurationMins: 10080 },
+        },
+        checkedAt,
+      ),
     ).toEqual({
       windows: [
         {
@@ -129,22 +176,28 @@ describe("codexRateLimitsToUpdate", () => {
         },
       ],
     });
-    expect(codexRateLimitsToUpdate({ planType: "plus" })).toBeUndefined();
+    expect(codexRateLimitsToUpdate({ planType: "plus" }, checkedAt)).toBeUndefined();
   });
 
   it("ignores Spark notifications so they cannot overwrite the main allowance", () => {
     expect(
-      codexRateLimitsToUpdate({
-        limitId: "codex_bengalfox",
-        primary: { usedPercent: 0, windowDurationMins: 300 },
-        secondary: { usedPercent: 90, windowDurationMins: 10080 },
-      }),
+      codexRateLimitsToUpdate(
+        {
+          limitId: "codex_bengalfox",
+          primary: { usedPercent: 0, windowDurationMins: 300 },
+          secondary: { usedPercent: 90, windowDurationMins: 10080 },
+        },
+        checkedAt,
+      ),
     ).toBeUndefined();
     expect(
-      codexRateLimitsToUpdate({
-        limitId: "codex",
-        secondary: { usedPercent: 42, windowDurationMins: 10080 },
-      })?.windows,
+      codexRateLimitsToUpdate(
+        {
+          limitId: "codex",
+          secondary: { usedPercent: 42, windowDurationMins: 10080 },
+        },
+        checkedAt,
+      )?.windows,
     ).toEqual([
       {
         id: "secondary",

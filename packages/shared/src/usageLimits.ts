@@ -17,6 +17,12 @@ const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;
 const DAY = 24 * HOUR;
 
+export function formatCredits(credits: NonNullable<ServerProviderUsageLimits["credits"]>): string {
+  if (credits.unlimited) return "Unlimited credits";
+  if (credits.balance !== undefined) return `Credits: ${credits.balance}`;
+  return credits.hasCredits ? "Credits available" : "No credits";
+}
+
 export const CHATGPT_USAGE_URL = "https://chatgpt.com/#settings/Usage";
 
 export function usesChatGptSharing(provider: ServerProvider | null | undefined): boolean {
@@ -169,6 +175,7 @@ export interface LimitAccount {
 export function collectLimitAccounts(presentations: LimitPresentations): readonly LimitAccount[] {
   const accounts = new Map<string, LimitAccount>();
   const creditSources = new Map<string, LimitAccount>();
+  const paidCreditSources = new Map<string, NonNullable<ServerProviderUsageLimits["credits"]>>();
   const hubRedeems = new Map<string, LimitAccount>();
   const merge = (key: string, next: LimitAccount) => {
     // Redeeming through a hub also clears the routing cooldown that hub holds
@@ -191,6 +198,14 @@ export function collectLimitAccounts(presentations: LimitPresentations): readonl
         Date.parse(next.limits.checkedAt) > Date.parse(previousCredit.limits.checkedAt))
     ) {
       creditSources.set(key, next);
+    }
+    const previousPaidCredits = paidCreditSources.get(key);
+    if (
+      next.limits.credits &&
+      (!previousPaidCredits ||
+        Date.parse(next.limits.credits.checkedAt) > Date.parse(previousPaidCredits.checkedAt))
+    ) {
+      paidCreditSources.set(key, next.limits.credits);
     }
     const previous = accounts.get(key);
     if (!previous) {
@@ -219,6 +234,7 @@ export function collectLimitAccounts(presentations: LimitPresentations): readonl
         (creditSource ? creditSource.redeem : (winner.redeem ?? previous.redeem ?? next.redeem)),
       limits: {
         ...winner.limits,
+        ...(paidCreditSources.has(key) ? { credits: paidCreditSources.get(key) } : {}),
         ...(creditSource?.limits.resetCredits
           ? { resetCredits: creditSource.limits.resetCredits }
           : { resetCredits: undefined }),

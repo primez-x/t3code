@@ -1276,6 +1276,7 @@ const layerDelegationTest = (
   refreshInstance: ProviderRegistry.ProviderRegistry["Service"]["refreshInstance"] = () =>
     Effect.succeed(providers),
   onProviderRead: () => void = () => {},
+  allowCredits = false,
 ) => {
   let currentProviders = providers;
   return ThreadManagementService.layer.pipe(
@@ -1335,6 +1336,7 @@ const layerDelegationTest = (
           delegationPolicy: {
             version: 1,
             mode,
+            allowCredits,
             balanceUsage: true,
             preferAlternateProvider: true,
             routes,
@@ -2132,6 +2134,76 @@ it.effect.each(["automatic", "explicit", "custom"] as const)(
           new Map(),
           [],
           { [provider.instanceId]: ["cheap-model"] },
+        ),
+      ),
+    );
+  },
+);
+
+it.effect(
+  "delegation refreshes stale paid credits even when subscription windows are fresh",
+  () => {
+    const commands: Array<OrchestrationV2Command> = [];
+    const refreshed: Array<ProviderInstanceId> = [];
+    const checkedAt = "1970-01-01T00:10:00.000Z";
+    const credits = {
+      checkedAt: "1970-01-01T00:00:00.000Z",
+      hasCredits: false,
+      unlimited: false,
+      balance: "0",
+    };
+    const provider: ServerProvider = {
+      ...delegationProvider,
+      usageLimits: {
+        checkedAt,
+        credits,
+        windows: [
+          {
+            id: "primary",
+            label: "Session",
+            kind: "session",
+            usedPercent: 100,
+            resetsAt: "1970-01-01T01:00:00.000Z",
+          },
+        ],
+      },
+    };
+    return Effect.gen(function* () {
+      yield* TestClock.adjust(Duration.minutes(10));
+      const threads = yield* ThreadManagementService.ThreadManagementService;
+      yield* threads.dispatch(delegationCommand());
+      expect(refreshed).toEqual([provider.instanceId]);
+      expect(commands[0]).toMatchObject({
+        modelSelection: { instanceId: provider.instanceId },
+        routingDecision: { headroomPercent: 0, usesCredits: true },
+      });
+    }).pipe(
+      Effect.provide(
+        layerDelegationTest(
+          commands,
+          [provider],
+          true,
+          "t3-managed",
+          undefined,
+          [provider.instanceId],
+          new Map(),
+          [],
+          {},
+          (instanceId) =>
+            Effect.sync(() => {
+              refreshed.push(instanceId);
+              return [
+                {
+                  ...provider,
+                  usageLimits: {
+                    ...provider.usageLimits!,
+                    credits: { ...credits, checkedAt, hasCredits: true, balance: "50" },
+                  },
+                },
+              ];
+            }),
+          undefined,
+          true,
         ),
       ),
     );

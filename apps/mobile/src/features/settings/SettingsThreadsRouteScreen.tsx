@@ -98,7 +98,9 @@ function DelegationSettingsRows() {
       setPending(false);
     });
   };
-  const uniform = <K extends "mode" | "balanceUsage" | "preferAlternateProvider">(key: K) =>
+  const uniform = <K extends "mode" | "balanceUsage" | "preferAlternateProvider" | "allowCredits">(
+    key: K,
+  ) =>
     selectedTargets.every(
       (target) => target.serverConfig.settings.delegationPolicy[key] === reference[key],
     )
@@ -138,6 +140,14 @@ function DelegationSettingsRows() {
           value={uniform("preferAlternateProvider")}
           disabled={disabled}
           onValueChange={(preferAlternateProvider) => writeToAll({ preferAlternateProvider })}
+        />
+        <SettingsSwitchRow
+          icon="ticket"
+          label="Allow credits"
+          subtitle="Allows delegated Codex tasks after subscription limits when paid credits are available. Off excludes exhausted Codex models."
+          value={uniform("allowCredits")}
+          disabled={disabled}
+          onValueChange={(allowCredits) => writeToAll({ allowCredits })}
         />
       </SettingsSection>
       <Text className="px-2 text-sm text-foreground-muted">

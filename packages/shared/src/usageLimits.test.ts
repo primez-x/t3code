@@ -55,6 +55,49 @@ function provider(overrides: Partial<ServerProvider>): ServerProvider {
   };
 }
 
+it("keeps paid credits from the newest credit observation across duplicate accounts", () => {
+  const credits = {
+    checkedAt: "2026-09-03T11:50:00.000Z",
+    hasCredits: true,
+    unlimited: false,
+    balance: "50",
+  };
+  const native = provider({
+    auth: { status: "authenticated", email: "same@example.com" },
+    usageLimits: { checkedAt: credits.checkedAt, windows: [window], credits },
+  });
+  const other = {
+    ...native,
+    usageLimits: {
+      checkedAt: "2026-09-03T12:01:00.000Z",
+      windows: [window],
+      credits: undefined as typeof credits | undefined,
+    },
+  };
+  const presentations = new Map([
+    [
+      EnvironmentId.make("a"),
+      { entry: { target: { label: "A" } }, serverConfig: { providers: [native] } },
+    ],
+    [
+      EnvironmentId.make("b"),
+      { entry: { target: { label: "B" } }, serverConfig: { providers: [other] } },
+    ],
+  ]);
+  expect(collectLimitAccounts(presentations)[0]?.limits.credits).toEqual(credits);
+  const depleted = {
+    ...credits,
+    checkedAt: "2026-09-03T11:55:00.000Z",
+    hasCredits: false,
+    balance: "0",
+  };
+  other.usageLimits = {
+    ...other.usageLimits,
+    credits: depleted,
+  };
+  expect(collectLimitAccounts(presentations)[0]?.limits.credits).toEqual(depleted);
+});
+
 describe("pace", () => {
   it.each([
     ["2026-09-03T12:01:00.000Z", "resets in 1m"],

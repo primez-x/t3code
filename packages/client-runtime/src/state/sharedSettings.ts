@@ -84,6 +84,7 @@ export function pickSharedServerSettings(
       delegationPolicy: Struct.pick(settings.delegationPolicy, [
         "mode",
         "balanceUsage",
+        "allowCredits",
         "preferAlternateProvider",
       ]),
     },

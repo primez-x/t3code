@@ -2137,7 +2137,9 @@ export function GeneralSettingsPanel() {
   const hasServerTargets = connectedEnvironments.length > 0;
   const [backgroundActivityDialogOpen, setBackgroundActivityDialogOpen] = useState(false);
   const mixedResponseStreamingMode = useScopedSettingsMixed(["responseStreamingMode"]);
-  const delegationSettingIsMixed = (key: "mode" | "balanceUsage" | "preferAlternateProvider") =>
+  const delegationSettingIsMixed = (
+    key: "mode" | "balanceUsage" | "preferAlternateProvider" | "allowCredits",
+  ) =>
     connectedEnvironments.some(
       (target) =>
         target.serverConfig?.settings.delegationPolicy[key] !== settings.delegationPolicy[key],
@@ -2145,6 +2147,7 @@ export function GeneralSettingsPanel() {
   const mixedDelegationMode = delegationSettingIsMixed("mode");
   const mixedDelegationUsage = delegationSettingIsMixed("balanceUsage");
   const mixedDelegationDiversity = delegationSettingIsMixed("preferAlternateProvider");
+  const mixedDelegationCredits = delegationSettingIsMixed("allowCredits");
   const lastEnabledProjectGroupingMode = useRef<SidebarProjectGroupingMode>(
     readLastEnabledProjectGroupingMode(),
   );
@@ -2535,6 +2538,24 @@ export function GeneralSettingsPanel() {
                 updateSettings({ delegationPolicy: { preferAlternateProvider } })
               }
               aria-label="Delegation model diversity"
+            />
+          }
+        />
+        <SettingsRow
+          id="delegation-allow-credits"
+          title="Allow credits"
+          mixed={mixedDelegationCredits}
+          serverScoped
+          settingKeys={["delegationPolicy"]}
+          description="Allows delegated Codex tasks after subscription limits when paid credits are available. Off excludes exhausted Codex models."
+          control={
+            <Switch
+              mixed={mixedDelegationCredits}
+              checked={!mixedDelegationCredits && settings.delegationPolicy.allowCredits}
+              onCheckedChange={(allowCredits) =>
+                updateSettings({ delegationPolicy: { allowCredits } })
+              }
+              aria-label="Delegation allow credits"
             />
           }
         />

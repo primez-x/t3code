@@ -45,7 +45,9 @@ describe("supportsSharedSettingsSync", () => {
 
 describe("splitSharedServerPatch", () => {
   it("shares delegation controls and detects differences across environments", () => {
-    const patch = { delegationPolicy: { mode: "t3-managed" as const, balanceUsage: false } };
+    const patch = {
+      delegationPolicy: { mode: "t3-managed" as const, balanceUsage: false, allowCredits: true },
+    };
     expect(splitSharedServerPatch(patch)).toEqual({ sharedPatch: patch, localPatch: {} });
     const primarySettings = {
       ...DEFAULT_SERVER_SETTINGS,

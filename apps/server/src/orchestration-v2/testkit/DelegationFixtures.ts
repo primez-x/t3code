@@ -12,6 +12,7 @@ export function makeDelegationFixtures(
   const policy: DelegationPolicy = {
     version: 1,
     mode: "native-preferred",
+    allowCredits: false,
     balanceUsage: false,
     preferAlternateProvider: false,
     routes: models.map(({ driver, model }) => ({

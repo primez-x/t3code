@@ -21,6 +21,49 @@ const weekly = {
 const published = { checkedAt, windows: [session, weekly] };
 
 describe("applyUsageLimitsUpdate", () => {
+  test("does not refresh subscription observations with a credit-only change", () => {
+    const nextCheckedAt = "2026-09-03T12:10:00.000Z";
+    const next = applyUsageLimitsUpdate({
+      previous: published,
+      checkedAt: nextCheckedAt,
+      update: {
+        windows: [],
+        credits: { checkedAt: nextCheckedAt, hasCredits: true, unlimited: false, balance: "30" },
+      },
+    });
+    expect(next?.checkedAt).toBe(checkedAt);
+    expect(next?.credits?.checkedAt).toBe(nextCheckedAt);
+  });
+
+  test("applies credit-only updates, preserves omitted credits, and clears explicit null", () => {
+    const credits = { checkedAt, hasCredits: true, unlimited: false, balance: "20" };
+    const previous = { ...published, credits };
+    const changed = applyUsageLimitsUpdate({
+      previous,
+      checkedAt,
+      update: { windows: [], credits: { ...credits, balance: "0", hasCredits: false } },
+    });
+    expect(changed?.credits).toMatchObject({ balance: "0", hasCredits: false });
+    expect(changed?.windows).toEqual(published.windows);
+    expect(
+      applyUsageLimitsUpdate({
+        previous,
+        checkedAt,
+        update: { windows: [{ ...session, usedPercent: 45 }] },
+      })?.credits,
+    ).toEqual(credits);
+    expect(
+      applyUsageLimitsUpdate({ previous, checkedAt, update: { windows: [], credits: null } }),
+    ).not.toHaveProperty("credits");
+    expect(
+      applyUsageLimitsUpdate({
+        previous,
+        checkedAt,
+        update: { windows: [], credits: { ...credits, checkedAt: "2026-09-03T12:00:05.000Z" } },
+      }),
+    ).toBe(previous);
+  });
+
   it("returns the published object itself when no window moved", () => {
     // Codex repeats the same numbers beside every token-usage tick; the
     // ingestion path relies on identity to skip the publish.

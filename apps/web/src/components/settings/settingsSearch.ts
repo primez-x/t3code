@@ -381,6 +381,13 @@ export const SETTINGS_SEARCH_ITEMS = [
     searchTerms: ["delegation alternate provider cost capability"],
   },
   {
+    id: "delegation-allow-credits",
+    title: "Allow credits",
+    to: "/settings/general",
+    scope: "environment-defaults",
+    searchTerms: ["delegation codex paid credits balance subscription limits exhausted"],
+  },
+  {
     id: "time-format",
     title: "Time format",
     to: "/settings/general",

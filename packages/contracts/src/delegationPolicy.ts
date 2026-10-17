@@ -45,6 +45,7 @@ export const DelegationPolicy = Schema.Struct({
   mode: DelegationMode.pipe(
     Schema.withDecodingDefault(Effect.succeed("native-preferred" as const)),
   ),
+  allowCredits: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   balanceUsage: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
   preferAlternateProvider: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
   routes: Schema.Array(DelegationModelRoute).pipe(Schema.withDecodingDefault(Effect.succeed([]))),
@@ -54,6 +55,7 @@ export type DelegationPolicy = typeof DelegationPolicy.Type;
 export const DelegationPolicyPatch = Schema.Struct({
   version: Schema.optionalKey(Schema.Literal(1)),
   mode: Schema.optionalKey(DelegationMode),
+  allowCredits: Schema.optionalKey(Schema.Boolean),
   balanceUsage: Schema.optionalKey(Schema.Boolean),
   preferAlternateProvider: Schema.optionalKey(Schema.Boolean),
   routes: Schema.optionalKey(Schema.Array(DelegationModelRoute)),
@@ -75,6 +77,7 @@ export const DelegationRoutingDecision = Schema.Struct({
     "lowest-cost",
   ]),
   headroomPercent: Schema.NullOr(Schema.Number),
+  usesCredits: Schema.optional(Schema.Boolean),
   usageCheckedAt: Schema.NullOr(IsoDateTime),
   substitution: Schema.optional(
     Schema.Struct({

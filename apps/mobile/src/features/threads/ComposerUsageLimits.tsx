@@ -1,4 +1,5 @@
 import type { EnvironmentId, UsageLimitsReport } from "@t3tools/contracts";
+import { formatCredits } from "@t3tools/shared/usageLimits";
 import { Pressable, ScrollView, useWindowDimensions, View } from "react-native";
 
 import { SymbolView } from "../../components/ui/AppSymbol";
@@ -61,14 +62,23 @@ export function ComposerUsageLimits({
               now={now}
               trailing={index === 0 ? close : undefined}
               footer={
-                resetCreditInput && account.limits.resetCredits ? (
-                  <ResetCredits
-                    dense
-                    environmentId={environmentId}
-                    input={resetCreditInput}
-                    credits={account.limits.resetCredits}
-                    now={now}
-                  />
+                account.limits.credits || (resetCreditInput && account.limits.resetCredits) ? (
+                  <>
+                    {account.limits.credits ? (
+                      <Text className="text-xs text-foreground-muted">
+                        {formatCredits(account.limits.credits)}
+                      </Text>
+                    ) : null}
+                    {resetCreditInput && account.limits.resetCredits ? (
+                      <ResetCredits
+                        dense
+                        environmentId={environmentId}
+                        input={resetCreditInput}
+                        credits={account.limits.resetCredits}
+                        now={now}
+                      />
+                    ) : null}
+                  </>
                 ) : undefined
               }
             />

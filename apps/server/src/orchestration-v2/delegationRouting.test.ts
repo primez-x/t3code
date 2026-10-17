@@ -80,6 +80,7 @@ const policy = (
 ): DelegationPolicy => ({
   version: 1,
   mode: "t3-managed",
+  allowCredits: false,
   balanceUsage: true,
   preferAlternateProvider: true,
   routes,
@@ -102,6 +103,99 @@ const selected = (result: ReturnType<typeof select>) => {
 };
 
 describe("selectDelegationTarget", () => {
+  const paidCredits = { checkedAt, hasCredits: true, unlimited: false, balance: "12500" };
+  const exhaustedWithCredits = (credits = paidCredits) => ({
+    ...codex,
+    usageLimits: { ...limits(100), credits },
+  });
+
+  test("honors an explicit exhausted Codex target only when credits are allowed", () => {
+    const requestedTarget = { instanceId: codex.instanceId, model: "gpt-6-sol" };
+    const input = { providers: [exhaustedWithCredits(), claude], requestedTarget };
+    expect(selected(select(input)).modelSelection.instanceId).toBe(claude.instanceId);
+    const result = selected(select({ ...input, policy: { ...policy(), allowCredits: true } }));
+    expect(result.modelSelection.instanceId).toBe(codex.instanceId);
+    expect(result.decision).toMatchObject({ headroomPercent: 0, usesCredits: true });
+    expect(result.decision.substitution).toBeUndefined();
+  });
+
+  test("keeps paid Codex capacity in automatic routing and provider-only requests", () => {
+    for (const requestedTarget of [undefined, { driver: codex.driver }]) {
+      const result = selected(
+        select({
+          providers: [exhaustedWithCredits(), claude],
+          policy: { ...policy(), allowCredits: true },
+          ...(requestedTarget === undefined ? {} : { requestedTarget }),
+        }),
+      );
+      expect(result.modelSelection.instanceId).toBe(codex.instanceId);
+      expect(result.decision.usesCredits).toBe(true);
+    }
+  });
+
+  test.each([
+    { ...paidCredits, hasCredits: false },
+    { ...paidCredits, balance: "0" },
+    { ...paidCredits, balance: "-1" },
+    { ...paidCredits, balance: "invalid" },
+    { ...paidCredits, checkedAt: "2026-10-14T11:00:00Z" },
+    { ...paidCredits, checkedAt: "2026-10-14T12:01:00Z" },
+  ])("rejects unavailable or stale paid credits %j", (credits) => {
+    const result = selected(
+      select({
+        providers: [exhaustedWithCredits(credits), claude],
+        policy: { ...policy(), allowCredits: true },
+        requestedTarget: { model: "gpt-6-sol" },
+      }),
+    );
+    expect(result.modelSelection.instanceId).toBe(claude.instanceId);
+    expect(result.decision.substitution?.reason).toContain("no remaining usage");
+  });
+
+  test("accepts unlimited credits and does not treat reset credits as paid capacity", () => {
+    const result = selected(
+      select({
+        providers: [
+          exhaustedWithCredits({
+            ...paidCredits,
+            hasCredits: false,
+            unlimited: true,
+            balance: "0",
+          }),
+        ],
+        policy: { ...policy(), allowCredits: true },
+      }),
+    );
+    expect(result.decision.usesCredits).toBe(true);
+    expect(
+      select({
+        providers: [
+          { ...codex, usageLimits: { ...limits(100), resetCredits: { availableCount: 4 } } },
+        ],
+        policy: { ...policy(), allowCredits: true },
+      }).ok,
+    ).toBe(false);
+  });
+
+  test("does not bypass a model-specific limit or another provider's exhausted quota", () => {
+    const scoped = exhaustedWithCredits();
+    scoped.models = scoped.models.filter((model) => model.slug === "gpt-6-sol");
+    scoped.usageLimits.windows = [{ ...limits(100).windows[0]!, modelFamily: "gpt-6-sol" }];
+    expect(
+      select({
+        providers: [scoped],
+        policy: { ...policy(), allowCredits: true },
+        requestedTarget: { model: "gpt-6-sol" },
+      }).ok,
+    ).toBe(false);
+    expect(
+      select({
+        providers: [{ ...claude, usageLimits: { ...limits(100), credits: paidCredits } }],
+        policy: { ...policy(), allowCredits: true },
+      }).ok,
+    ).toBe(false);
+  });
+
   test.each([false, true])(
     "uses an independent fallback after an Opus writer (Astra excluded: %s)",
     (excludeAstra) => {

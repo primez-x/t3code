@@ -4361,9 +4361,9 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                 turnItem: updated,
               });
             }
-            const update = codexRateLimitsToUpdate(payload.rateLimits);
+            const checkedAt = DateTime.formatIso(yield* DateTime.now);
+            const update = codexRateLimitsToUpdate(payload.rateLimits, checkedAt);
             if (update && adapterOptions.onUsageLimits) {
-              const checkedAt = DateTime.formatIso(yield* DateTime.now);
               yield* adapterOptions.onUsageLimits({ ...update, checkedAt });
             }
           }).pipe(Effect.orDie),

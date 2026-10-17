@@ -1210,6 +1210,7 @@ describe("ServerSettings delegation policy", () => {
     version: 1,
     mode: "t3-managed",
     balanceUsage: false,
+    allowCredits: true,
     preferAlternateProvider: false,
     routes: [
       {
@@ -1226,6 +1227,7 @@ describe("ServerSettings delegation policy", () => {
     expect(decodeServerSettings({}).delegationPolicy).toEqual({
       version: 1,
       mode: "native-preferred",
+      allowCredits: false,
       balanceUsage: true,
       preferAlternateProvider: true,
       routes: [],
@@ -1237,6 +1239,7 @@ describe("ServerSettings delegation policy", () => {
   it.each([
     { mode: "t3-managed" },
     { balanceUsage: false },
+    { allowCredits: true },
     { preferAlternateProvider: false },
     { routes: [] },
     { version: 1 },
@@ -1262,6 +1265,7 @@ describe("ServerSettings delegation policy", () => {
     { version: 2 },
     { mode: "automatic" },
     { balanceUsage: "true" },
+    { allowCredits: "true" },
     { preferAlternateProvider: null },
     { routes: [{ ...policy.routes[0], model: " " }] },
     { routes: [{ ...policy.routes[0], effort: "max" }] },

@@ -7,6 +7,7 @@ test("the combined preset contains only supplied costs and bounded Muse routes",
   const policy = resolveDelegationPolicy({
     version: 1,
     mode: "t3-managed",
+    allowCredits: false,
     balanceUsage: true,
     preferAlternateProvider: true,
     routes: [],
@@ -44,6 +45,7 @@ test("configured routes replace the built-in preset", () => {
     resolveDelegationPolicy({
       version: 1,
       mode: "native-preferred",
+      allowCredits: false,
       balanceUsage: false,
       preferAlternateProvider: false,
       routes,
@@ -85,6 +87,7 @@ test("the default Codex exact lookup floor uses Luna medium", () => {
   const policy = resolveDelegationPolicy({
     version: 1,
     mode: "t3-managed",
+    allowCredits: false,
     balanceUsage: true,
     preferAlternateProvider: true,
     routes: [],

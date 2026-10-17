@@ -33,6 +33,13 @@ export const ServerProviderResetCredits = Schema.Struct({
 });
 export type ServerProviderResetCredits = typeof ServerProviderResetCredits.Type;
 
+const ProviderCredits = Schema.Struct({
+  checkedAt: IsoDateTime,
+  hasCredits: Schema.Boolean,
+  unlimited: Schema.Boolean,
+  balance: Schema.optional(TrimmedNonEmptyString),
+});
+
 /**
  * `unavailable` distinguishes an account that can never report windows (API
  * key, Bedrock) from a probe that failed this time, so clients can keep the
@@ -43,6 +50,7 @@ export const ServerProviderUsageLimits = Schema.Struct({
   windows: ForwardCompatibleArray(ServerProviderUsageWindow),
   credentialFingerprint: Schema.optional(TrimmedNonEmptyString),
   resetCredits: Schema.optional(ServerProviderResetCredits),
+  credits: Schema.optional(ProviderCredits),
   externalUsage: Schema.optional(
     Schema.Struct({
       label: TrimmedNonEmptyString,
@@ -65,6 +73,7 @@ export type ServerProviderUsageLimits = typeof ServerProviderUsageLimits.Type;
  */
 export const ProviderUsageLimitsUpdate = Schema.Struct({
   windows: Schema.Array(ServerProviderUsageWindow),
+  credits: Schema.optional(Schema.NullOr(ProviderCredits)),
 });
 export type ProviderUsageLimitsUpdate = typeof ProviderUsageLimitsUpdate.Type;
 

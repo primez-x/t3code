@@ -77,6 +77,7 @@ export type DelegationSelectionResult =
 
 interface Quota {
   readonly headroomPercent: number | null;
+  readonly usesCredits?: boolean;
   readonly usageCheckedAt: string | null;
 }
 
@@ -117,7 +118,16 @@ function applicableWindow(window: ServerProviderUsageWindow, model: string): boo
   return scope === undefined || isFamily(model, `claude-${scope}`);
 }
 
-function quotaFor(provider: ServerProvider, model: string, nowMs: number): Quota {
+function quotaExhausted(quota: Quota): boolean {
+  return quota.headroomPercent === 0 && quota.usesCredits !== true;
+}
+
+function quotaFor(
+  provider: ServerProvider,
+  model: string,
+  nowMs: number,
+  allowCredits: boolean,
+): Quota {
   const limits = provider.usageLimits;
   if (!limits || limits.unavailable || !Number.isFinite(nowMs)) return unknownQuota;
   const checked = DateTime.make(limits.checkedAt);
@@ -127,6 +137,7 @@ function quotaFor(provider: ServerProvider, model: string, nowMs: number): Quota
   const windows = limits.windows.filter((window) => applicableWindow(window, model));
   if (windows.length === 0) return unknownQuota;
   let headroomPercent = 100;
+  let modelExhausted = false;
   let incomplete = limits.windows.some((window) => window.modelFamily === "unrecognized");
   for (const window of windows) {
     const reset = DateTime.make(window.resetsAt ?? "");
@@ -140,10 +151,30 @@ function quotaFor(provider: ServerProvider, model: string, nowMs: number): Quota
       incomplete = true;
       continue;
     }
+    if (window.modelFamily !== undefined && window.usedPercent === 100) modelExhausted = true;
     headroomPercent = Math.min(headroomPercent, 100 - window.usedPercent);
   }
   if (incomplete && headroomPercent !== 0) return unknownQuota;
-  return { headroomPercent, usageCheckedAt: limits.checkedAt };
+  const credits = limits.credits;
+  const creditsCheckedMs = Date.parse(credits?.checkedAt ?? "");
+  const usesCredits =
+    headroomPercent === 0 &&
+    !modelExhausted &&
+    provider.driver === "codex" &&
+    allowCredits &&
+    credits !== undefined &&
+    Number.isFinite(creditsCheckedMs) &&
+    creditsCheckedMs <= nowMs &&
+    nowMs - creditsCheckedMs <= 300_000 &&
+    (credits.unlimited ||
+      (credits.hasCredits &&
+        (credits.balance === undefined ||
+          (Number.isFinite(Number(credits.balance)) && Number(credits.balance) > 0))));
+  return {
+    headroomPercent,
+    usageCheckedAt: limits.checkedAt,
+    ...(usesCredits ? { usesCredits: true } : {}),
+  };
 }
 
 function canServe(provider: ServerProvider, input: DelegationSelectionInput): boolean {
@@ -255,7 +286,7 @@ function selectDelegationTargetOnce(input: DelegationSelectionInput): Delegation
     const relevantModels =
       advisorModels.length > 0 ? advisorModels.map((model) => model.slug) : [advisorFamily];
     return relevantModels.some(
-      (model) => quotaFor(provider, model, input.nowMs).headroomPercent !== 0,
+      (model) => !quotaExhausted(quotaFor(provider, model, input.nowMs, input.policy.allowCredits)),
     );
   });
   const parentDriver = input.providers.find(
@@ -278,7 +309,7 @@ function selectDelegationTargetOnce(input: DelegationSelectionInput): Delegation
             !model.isCustom &&
             isFamily(model.slug, advisorFamily) &&
             excluded(model) &&
-            quotaFor(provider, model.slug, input.nowMs).headroomPercent !== 0,
+            !quotaExhausted(quotaFor(provider, model.slug, input.nowMs, input.policy.allowCredits)),
         ),
     );
   const automaticAdvisor = advisor && input.requestedTarget === undefined;
@@ -353,8 +384,8 @@ function selectDelegationTargetOnce(input: DelegationSelectionInput): Delegation
           continue;
         if (input.requestedTarget) eligibleRequested.push({ provider, model });
         if (!canServe(provider, input)) continue;
-        const quota = quotaFor(provider, model.slug, input.nowMs);
-        if (quota.headroomPercent === 0) continue;
+        const quota = quotaFor(provider, model.slug, input.nowMs, input.policy.allowCredits);
+        if (quotaExhausted(quota)) continue;
         candidates.push({
           provider,
           model,
@@ -377,9 +408,10 @@ function selectDelegationTargetOnce(input: DelegationSelectionInput): Delegation
       eligibleRequested.length > 0 && servingRequested.length === 0
         ? ("provider-unavailable" as const)
         : servingRequested.length > 0 &&
-            servingRequested.every(
-              ({ provider, model }) =>
-                quotaFor(provider, model.slug, input.nowMs).headroomPercent === 0,
+            servingRequested.every(({ provider, model }) =>
+              quotaExhausted(
+                quotaFor(provider, model.slug, input.nowMs, input.policy.allowCredits),
+              ),
             )
           ? ("usage-exhausted" as const)
           : undefined;
@@ -409,18 +441,20 @@ function selectDelegationTargetOnce(input: DelegationSelectionInput): Delegation
     );
   }
 
+  // Paid credits keep an exhausted subscription eligible without changing the reported subscription percentage.
+  const availableHeadroom = (candidate: Candidate) =>
+    candidate.quota.usesCredits ? 100 : candidate.quota.headroomPercent;
   // Filter by a fixed maximum before comparison so tolerance cannot produce cyclic rankings.
   const greatestHeadroom = candidates.reduce(
     (greatest, candidate) =>
-      Math.max(greatest, candidate.quota.headroomPercent ?? Number.NEGATIVE_INFINITY),
+      Math.max(greatest, availableHeadroom(candidate) ?? Number.NEGATIVE_INFINITY),
     Number.NEGATIVE_INFINITY,
   );
   const balanced = input.policy.balanceUsage
     ? candidates.filter(
         (candidate) =>
           greatestHeadroom === Number.NEGATIVE_INFINITY ||
-          (candidate.quota.headroomPercent !== null &&
-            candidate.quota.headroomPercent >= greatestHeadroom - 5),
+          (availableHeadroom(candidate) ?? Number.NEGATIVE_INFINITY) >= greatestHeadroom - 5,
       )
     : candidates;
   const alternateProvider = (candidate: Candidate) =>
