@@ -1958,7 +1958,7 @@ describe("OrchestratorMcpService provider resolution", () => {
             getThreadRecords: () => Effect.succeed(parentProjection([])),
           }),
           ServerSettings.layerTest({
-            delegationPolicy: { mode: "t3-managed" },
+            delegationPolicy: { mode: "t3-managed", allowFallback: false },
             providerInstances: {
               [provider.instanceId]: { driver: provider.driver, enabled: true },
             },
@@ -1974,6 +1974,12 @@ describe("OrchestratorMcpService provider resolution", () => {
           const result = yield* service.capabilities(scope);
           assert.equal(result.delegationPolicy?.mode, "t3-managed");
           assert.equal(result.delegationPolicy?.routes.length, 22);
+          assert.isFalse(result.delegationPolicy?.allowFallback);
+          assert.isTrue(
+            (result.delegationConstraints ?? []).some((constraint) =>
+              constraint.includes("Do not bypass strict target policy"),
+            ),
+          );
           assert.isFalse(result.providers[0]?.canRunChildTask);
           assert.isTrue(
             result.providers[0]?.constraints.some((constraint) =>

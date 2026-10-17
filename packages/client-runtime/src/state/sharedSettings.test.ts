@@ -44,9 +44,59 @@ describe("supportsSharedSettingsSync", () => {
 });
 
 describe("splitSharedServerPatch", () => {
+  it("keeps account-specific delegation controls and routes on the source environment", () => {
+    const instance = ProviderInstanceId.make("private-account");
+    const localPolicy = {
+      preferredProviderInstanceId: instance,
+      allowCreditsByProvider: { [instance]: false },
+      routes: [],
+    };
+    const sharedPolicy = {
+      routingPriority: "provider" as const,
+      allowFallback: false,
+      minimumHeadroomPercent: 15,
+    };
+    const patch = { delegationPolicy: { ...sharedPolicy, ...localPolicy } };
+    expect(splitSharedServerPatch(patch)).toEqual({
+      sharedPatch: { delegationPolicy: sharedPolicy },
+      localPatch: { delegationPolicy: localPolicy },
+    });
+    expect(filterSharedServerPatch(patch, restartCapabilities)).toEqual({
+      delegationPolicy: sharedPolicy,
+    });
+    expect(filterSharedServerPatch(patch, restartCapabilities, undefined, undefined, true)).toEqual(
+      patch,
+    );
+    const settings = {
+      ...DEFAULT_SERVER_SETTINGS,
+      delegationPolicy: {
+        ...DEFAULT_SERVER_SETTINGS.delegationPolicy,
+        ...sharedPolicy,
+        ...localPolicy,
+      },
+    };
+    expect(pickSharedServerSettings(settings, restartCapabilities).delegationPolicy).toMatchObject(
+      sharedPolicy,
+    );
+    expect(
+      pickSharedServerSettings(settings, restartCapabilities).delegationPolicy,
+    ).not.toHaveProperty("preferredProviderInstanceId");
+    expect(
+      pickSharedServerSettings(settings, restartCapabilities).delegationPolicy,
+    ).not.toHaveProperty("allowCreditsByProvider");
+    expect(splitSharedServerPatch({ delegationPolicy: localPolicy })).toEqual({
+      sharedPatch: {},
+      localPatch: { delegationPolicy: localPolicy },
+    });
+  });
+
   it("shares delegation controls and detects differences across environments", () => {
     const patch = {
-      delegationPolicy: { mode: "t3-managed" as const, balanceUsage: false, allowCredits: true },
+      delegationPolicy: {
+        mode: "t3-managed" as const,
+        routingPriority: "cost" as const,
+        allowCredits: true,
+      },
     };
     expect(splitSharedServerPatch(patch)).toEqual({ sharedPatch: patch, localPatch: {} });
     const primarySettings = {

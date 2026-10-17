@@ -836,7 +836,7 @@ const make = Effect.gen(function* () {
           provider.usageLimits?.extraUsage?.checkedAt,
         ];
         const needsCreditRefresh =
-          policy.allowCredits &&
+          (policy.allowCreditsByProvider[provider.instanceId] ?? policy.allowCredits) &&
           provider.usageLimits?.windows.some((window) => window.usedPercent === 100) &&
           !paidObservations.some((timestamp) => {
             const observed = Date.parse(timestamp ?? "");

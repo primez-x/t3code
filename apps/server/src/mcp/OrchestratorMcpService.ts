@@ -1849,9 +1849,13 @@ const make = Effect.gen(function* () {
           delegationPolicy,
           delegationConstraints: [
             "Delegated effort is capped at xhigh. Fast mode and priority service are forbidden.",
-            "Provider usageLimits exposes subscription windows, paid credits, and extraUsage separately. A provider can remain eligible at zero subscription headroom when delegationPolicy.allowCredits is true and fresh paid usage is confirmed available. An enabled spending limit alone does not confirm available funds. A routing decision with usesCredits=true keeps headroomPercent as the subscription percentage.",
+            "Provider usageLimits exposes subscription windows, paid credits, and extraUsage separately. Resolve paid permission as allowCreditsByProvider[providerInstanceId] ?? allowCredits. A provider remains eligible at zero subscription headroom when paid permission allows fresh, confirmed paid usage. An enabled spending limit alone does not confirm available funds. A routing decision with usesCredits=true keeps headroomPercent as the subscription percentage.",
+            "Omit target for automatic selection. Supply target for an explicit user request in either mode.",
+            delegationPolicy.allowFallback
+              ? "If a requested target is unavailable or exhausted, T3 selects a capable substitute and records the reason. Report the requested target, selected target, and substitution reason."
+              : "Target fallback is disabled. Report an unavailable or exhausted explicit target. Do not bypass strict target policy by omitting the target or choosing another provider.",
             delegationPolicy.mode === "t3-managed"
-              ? "Omit target for automatic selection. Supply target for an explicit user request in either mode. If a requested target is unavailable or exhausted, T3 selects a capable substitute and records the reason. Report the requested target, selected target, and substitution reason. Native delegation controls apply to Codex, Claude, and Muse only."
+              ? "Native delegation controls apply to Codex, Claude, and Muse only."
               : "T3 applies the policy to automatic targets and validates explicit targets. Native provider delegation remains available.",
           ],
           parentThreadId: parent?.thread.id ?? null,

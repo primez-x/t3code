@@ -56,10 +56,19 @@ Select environments to change delegation settings. Projects cannot override dele
 **T3 managed** lets T3 select each delegated provider, model, and effort, and control native subagent launches.
 Both modes follow the same capability, cost, available usage, and Advisor rules. T3 managed enforces those rules. Native preferred relies on agent instructions.
 
-Enable **Usage balance** to favor capable models with more usage available.
-When disabled, remaining usage does not rank choices. Exhausted models remain excluded.
-Enable **Model diversity** to favor another provider or model when usage is comparable or unknown.
-When disabled, choose by capability, usage, and cost.
+Choose a routing priority: available subscription quota, lowest estimated cost, or a preferred provider.
+Explicit model requests take precedence. Allow fallback permits a capable substitute when a requested target is unavailable.
+Disable fallback to report the unavailable target without a substitute.
+
+A quota reserve excludes new assignments at or below the selected remaining percentage.
+A positive reserve also excludes providers with unknown usage. Active tasks may consume more than the reserve.
+Confirmed paid usage remains eligible after subscription exhaustion when the account allows credits.
+Provider credit overrides and preferred accounts stay on their environment when shared settings sync.
+
+Select one environment to edit model routes and provider preferences.
+Routes assign task capabilities, effort, and estimated cost to a model or model family.
+Cost estimates compare models; the estimates do not predict the final bill.
+Model diversity favors another provider or model when the chosen priority permits a tie.
 
 Changes apply to new delegated tasks and turns after the agent session refreshes.
 The root model stays unchanged.

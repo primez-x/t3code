@@ -26,6 +26,12 @@ export type SharedServerSettingKey = (typeof SHARED_SERVER_SETTING_KEYS)[number]
 
 const SHARED_KEY_SET = new Set<string>(SHARED_SERVER_SETTING_KEYS);
 
+const LOCAL_DELEGATION_POLICY_KEYS = [
+  "preferredProviderInstanceId",
+  "allowCreditsByProvider",
+  "routes",
+] as const;
+
 export function splitSharedServerPatch(patch: ServerSettingsPatch): {
   sharedPatch: ServerSettingsPatch;
   localPatch: ServerSettingsPatch;
@@ -33,7 +39,12 @@ export function splitSharedServerPatch(patch: ServerSettingsPatch): {
   const sharedPatch: Record<string, unknown> = {};
   const localPatch: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(patch)) {
-    if (SHARED_KEY_SET.has(key)) {
+    if (key === "delegationPolicy" && patch.delegationPolicy) {
+      const local = Struct.pick(patch.delegationPolicy, LOCAL_DELEGATION_POLICY_KEYS);
+      const shared = Struct.omit(patch.delegationPolicy, LOCAL_DELEGATION_POLICY_KEYS);
+      if (Object.keys(local).length > 0) localPatch[key] = local;
+      if (Object.keys(shared).length > 0) sharedPatch[key] = shared;
+    } else if (SHARED_KEY_SET.has(key)) {
       sharedPatch[key] = value;
     } else {
       localPatch[key] = value;
@@ -52,6 +63,13 @@ export function filterSharedServerPatch(
   sourceSettings = settings,
   targetIsSource = false,
 ): ServerSettingsPatch {
+  if (!targetIsSource && patch.delegationPolicy) {
+    const policy = Struct.omit(patch.delegationPolicy, LOCAL_DELEGATION_POLICY_KEYS);
+    patch =
+      Object.keys(policy).length === 0
+        ? Struct.omit(patch, ["delegationPolicy"])
+        : { ...patch, delegationPolicy: policy };
+  }
   const instanceId =
     patch.textGenerationModelSelection?.instanceId ??
     sourceSettings?.textGenerationModelSelection.instanceId;
@@ -83,7 +101,9 @@ export function pickSharedServerSettings(
       ...Struct.pick(settings, SHARED_SERVER_SETTING_KEYS),
       delegationPolicy: Struct.pick(settings.delegationPolicy, [
         "mode",
-        "balanceUsage",
+        "routingPriority",
+        "allowFallback",
+        "minimumHeadroomPercent",
         "allowCredits",
         "preferAlternateProvider",
       ]),

@@ -81,7 +81,11 @@ const policy = (
   version: 1,
   mode: "t3-managed",
   allowCredits: false,
-  balanceUsage: true,
+  routingPriority: "usage",
+  preferredProviderInstanceId: null,
+  allowFallback: true,
+  minimumHeadroomPercent: 0,
+  allowCreditsByProvider: {},
   preferAlternateProvider: true,
   routes,
 });
@@ -158,6 +162,163 @@ describe("selectDelegationTarget", () => {
     ...codex,
     usageLimits: { ...limits(100), credits },
   });
+
+  test.each([
+    ["usage", "claude_main"],
+    ["cost", "codex_main"],
+    ["provider", "codex_main"],
+  ] as const)("selects by %s priority", (routingPriority, expected) => {
+    const result = selected(
+      select({
+        policy: {
+          ...policy([
+            route("codex", "gpt-6-sol", 0.1),
+            route("claudeAgent", "claude-fable-5-1", 2),
+          ]),
+          routingPriority,
+        },
+        providers: [codex, { ...claude, usageLimits: limits(20) }],
+      }),
+    );
+    expect(result.modelSelection.instanceId).toBe(expected);
+    expect(result.decision.reason).toBe(
+      routingPriority === "provider"
+        ? "preferred-provider"
+        : routingPriority === "cost"
+          ? "lowest-cost"
+          : "headroom",
+    );
+  });
+
+  test("prefers the configured instance before headroom or provider diversity", () => {
+    const preferred = {
+      ...codex,
+      instanceId: ProviderInstanceId.make("codex_preferred"),
+      usageLimits: limits(90),
+    };
+    const result = selected(
+      select({
+        policy: {
+          ...policy(),
+          routingPriority: "provider",
+          preferredProviderInstanceId: preferred.instanceId,
+        },
+        providers: [codex, claude, preferred],
+      }),
+    );
+    expect(result.modelSelection.instanceId).toBe(preferred.instanceId);
+    expect(result.decision.reason).toBe("preferred-provider");
+  });
+
+  test.each(["unavailable", "exhausted"])(
+    "uses usage priority when the preferred instance is %s",
+    (state) => {
+      const preferred = {
+        ...codex,
+        ...(state === "unavailable" ? { enabled: false } : { usageLimits: limits(100) }),
+      };
+      const result = selected(
+        select({
+          policy: {
+            ...policy(),
+            routingPriority: "provider",
+            preferredProviderInstanceId: codex.instanceId,
+            allowFallback: false,
+          },
+          providers: [preferred, claude],
+        }),
+      );
+      expect(result.modelSelection.instanceId).toBe(claude.instanceId);
+      expect(result.decision.substitution).toBeUndefined();
+    },
+  );
+
+  test.each(["unavailable", "exhausted"])(
+    "refuses an explicit %s target when fallback is disabled",
+    (state) => {
+      const target = {
+        ...codex,
+        ...(state === "unavailable" ? { enabled: false } : { usageLimits: limits(100) }),
+      };
+      const result = select({
+        policy: { ...policy(), allowFallback: false },
+        providers: [target, claude],
+        requestedTarget: { instanceId: target.instanceId, model: "gpt-6-sol" },
+      });
+      expect(result.ok).toBe(false);
+      if (!result.ok)
+        expect(result.error.unavailableReason).toBe(
+          state === "unavailable" ? "provider-unavailable" : "usage-exhausted",
+        );
+    },
+  );
+
+  test.each([
+    [0, undefined, true],
+    [1, undefined, false],
+    [20, 79, true],
+    [20, 80, false],
+    [20, 81, false],
+    [100, 0, false],
+    [0, 100, false],
+  ] as const)("applies reserve %s with usage %s", (minimumHeadroomPercent, used, expected) => {
+    const result = select({
+      policy: { ...policy(), minimumHeadroomPercent },
+      providers: [{ ...codex, usageLimits: used === undefined ? undefined : limits(used) }],
+    });
+    expect(result.ok).toBe(expected);
+  });
+
+  test("reports a reserve rejection when an explicit target uses a substitute", () => {
+    const result = selected(
+      select({
+        policy: { ...policy(), minimumHeadroomPercent: 60 },
+        providers: [codex, { ...claude, usageLimits: limits(20) }],
+        requestedTarget: { instanceId: codex.instanceId, model: "gpt-6-sol" },
+      }),
+    );
+    expect(result.modelSelection.instanceId).toBe(claude.instanceId);
+    expect(result.decision.substitution?.reason).toContain("headroom reserve");
+  });
+
+  test("does not spend paid credits to bypass a subscription reserve", () => {
+    const result = select({
+      policy: { ...policy(), minimumHeadroomPercent: 20, allowCredits: true },
+      providers: [{ ...codex, usageLimits: { ...limits(80), credits: paidCredits } }],
+    });
+    expect(result.ok).toBe(false);
+  });
+
+  test("keeps confirmed paid capacity eligible after subscription exhaustion despite a reserve", () => {
+    const result = selected(
+      select({
+        policy: { ...policy(), minimumHeadroomPercent: 100, allowCredits: true },
+        providers: [exhaustedWithCredits()],
+      }),
+    );
+    expect(result.decision).toMatchObject({ usesCredits: true, headroomPercent: 0 });
+  });
+
+  test.each([
+    [false, true, true],
+    [true, false, false],
+    [true, undefined, true],
+    [false, undefined, false],
+  ] as const)(
+    "resolves paid permission global=%s override=%s",
+    (allowCredits, override, expected) => {
+      const result = select({
+        policy: {
+          ...policy(),
+          allowCredits,
+          allowCreditsByProvider: override === undefined ? {} : { [codex.instanceId]: override },
+        },
+        providers: [exhaustedWithCredits()],
+      });
+      expect(result.ok).toBe(expected);
+      if (result.ok) expect(result.decision.headroomPercent).toBe(0);
+    },
+  );
 
   test("honors an explicit exhausted Codex target only when credits are allowed", () => {
     const requestedTarget = { instanceId: codex.instanceId, model: "gpt-6-sol" };
@@ -579,11 +740,11 @@ describe("selectDelegationTarget", () => {
     expect(result.modelSelection.instanceId).toBe("claude_main");
     expect(result.decision.headroomPercent).toBeNull();
   });
-  test("keeps unknown usage eligible when balance is disabled", () => {
+  test("keeps unknown usage eligible with cost priority", () => {
     const result = selected(
       select({
-        policy: { ...policy(), balanceUsage: false },
-        providers: [codex, { ...claude, usageLimits: undefined }],
+        policy: { ...policy(), routingPriority: "cost" },
+        providers: [{ ...claude, usageLimits: undefined }],
       }),
     );
     expect(result.modelSelection.instanceId).toBe("claude_main");
@@ -629,19 +790,19 @@ describe("selectDelegationTarget", () => {
       ).modelSelection.model,
     ).toBe("gpt-6-luna");
   });
-  test("never selects known exhausted quota even when balance is disabled", () => {
+  test("never selects known exhausted quota with cost priority", () => {
     expect(
       selected(
         select({
-          policy: { ...policy(), balanceUsage: false },
+          policy: { ...policy(), routingPriority: "cost" },
           providers: [codex, { ...claude, usageLimits: limits(100, "seven_day") }],
         }),
       ).modelSelection.instanceId,
     ).toBe("codex_main");
   });
-  test.each([true, false])(
-    "rejects Muse exhausted shared session with open weekly quota (balance %s)",
-    (balanceUsage) => {
+  test.each(["usage", "cost"] as const)(
+    "rejects Muse exhausted shared session with open weekly quota (priority %s)",
+    (routingPriority) => {
       const usageLimits = decodeUsageLimits(
         museSubscriptionUsageToUpdate({
           observedAtMs: Date.parse(checkedAt),
@@ -651,7 +812,7 @@ describe("selectDelegationTarget", () => {
       );
       const result = select({
         providers: [provider("muse_main", "muse", ["Spark1.3"], usageLimits)],
-        policy: { ...policy([route("muse", "Spark1.3")]), balanceUsage },
+        policy: { ...policy([route("muse", "Spark1.3")]), routingPriority },
       });
       expect(result.ok).toBe(false);
     },

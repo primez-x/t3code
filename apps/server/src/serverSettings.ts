@@ -298,6 +298,12 @@ const LegacyProviderSettingsJson = fromLenientJson(
     providers: Schema.optionalKey(Schema.Record(Schema.String, Schema.Unknown)),
     bitbucket: Schema.optionalKey(Schema.Record(Schema.String, Schema.Unknown)),
     github: Schema.optionalKey(Schema.Record(Schema.String, Schema.Unknown)),
+    delegationPolicy: Schema.optionalKey(
+      Schema.Struct({
+        balanceUsage: Schema.optionalKey(Schema.Boolean),
+        routingPriority: Schema.optionalKey(Schema.Unknown),
+      }),
+    ),
   }),
 );
 const decodeLegacyProviderSettingsJsonExit = Schema.decodeUnknownExit(LegacyProviderSettingsJson);
@@ -658,6 +664,7 @@ const make = Effect.gen(function* () {
     let settings = DEFAULT_SERVER_SETTINGS;
     let legacyProviders: Readonly<Record<string, unknown>> | undefined;
     let legacySourceControl: Parameters<typeof migrateLegacySourceControlSettings>[1] = {};
+    let hasLegacyDelegationPolicy = false;
     // A file that failed to decode must stay on disk for the user to repair;
     // the fold below only writes when it started from the file's real contents.
     let settingsFileTrusted = true;
@@ -687,6 +694,17 @@ const make = Effect.gen(function* () {
         }
       } else {
         settings = decoded.value;
+        const legacyPolicy = legacySettings.value.delegationPolicy;
+        hasLegacyDelegationPolicy = legacyPolicy?.balanceUsage !== undefined;
+        if (hasLegacyDelegationPolicy && legacyPolicy?.routingPriority === undefined) {
+          settings = {
+            ...settings,
+            delegationPolicy: {
+              ...settings.delegationPolicy,
+              routingPriority: legacyPolicy?.balanceUsage ? "usage" : "cost",
+            },
+          };
+        }
       }
     }
 
@@ -780,6 +798,7 @@ const make = Effect.gen(function* () {
     if (
       migrated !== loaded ||
       (settingsFileTrusted && legacyProviders !== undefined) ||
+      hasLegacyDelegationPolicy ||
       hasLegacySourceControl
     ) {
       yield* writeSettingsAtomically(migrated);

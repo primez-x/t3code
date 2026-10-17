@@ -3,6 +3,7 @@ import {
   CommandId,
   type ServerProvider,
   type DelegationMode,
+  type DelegationPolicyPatch,
   type DelegationModelRoute,
   MessageId,
   NodeId,
@@ -1277,6 +1278,7 @@ const layerDelegationTest = (
     Effect.succeed(providers),
   onProviderRead: () => void = () => {},
   allowCredits = false,
+  policyPatch: DelegationPolicyPatch = {},
 ) => {
   let currentProviders = providers;
   return ThreadManagementService.layer.pipe(
@@ -1337,9 +1339,10 @@ const layerDelegationTest = (
             version: 1,
             mode,
             allowCredits,
-            balanceUsage: true,
+            routingPriority: "usage",
             preferAlternateProvider: true,
             routes,
+            ...policyPatch,
           },
           providerInstances: {
             ...providers.reduce(
@@ -2140,9 +2143,13 @@ it.effect.each(["automatic", "explicit", "custom"] as const)(
   },
 );
 
-it.effect(
-  "delegation refreshes stale paid credits even when subscription windows are fresh",
-  () => {
+it.effect.each([
+  { allowCredits: true, override: undefined, permitted: true },
+  { allowCredits: false, override: true, permitted: true },
+  { allowCredits: true, override: false, permitted: false },
+])(
+  "delegation refreshes stale paid credits according to resolved permission %j",
+  ({ allowCredits, override, permitted }) => {
     const commands: Array<OrchestrationV2Command> = [];
     const refreshed: Array<ProviderInstanceId> = [];
     const checkedAt = "1970-01-01T00:10:00.000Z";
@@ -2171,12 +2178,19 @@ it.effect(
     return Effect.gen(function* () {
       yield* TestClock.adjust(Duration.minutes(10));
       const threads = yield* ThreadManagementService.ThreadManagementService;
-      yield* threads.dispatch(delegationCommand());
-      expect(refreshed).toEqual([provider.instanceId]);
-      expect(commands[0]).toMatchObject({
-        modelSelection: { instanceId: provider.instanceId },
-        routingDecision: { headroomPercent: 0, usesCredits: true },
-      });
+      const request = threads.dispatch(delegationCommand());
+      if (permitted) {
+        yield* request;
+        expect(refreshed).toEqual([provider.instanceId]);
+        expect(commands[0]).toMatchObject({
+          modelSelection: { instanceId: provider.instanceId },
+          routingDecision: { headroomPercent: 0, usesCredits: true },
+        });
+      } else {
+        yield* request.pipe(Effect.flip);
+        expect(refreshed).toEqual([]);
+        expect(commands).toEqual([]);
+      }
     }).pipe(
       Effect.provide(
         layerDelegationTest(
@@ -2203,7 +2217,11 @@ it.effect(
               ];
             }),
           undefined,
-          true,
+          allowCredits,
+          {
+            allowCreditsByProvider:
+              override === undefined ? {} : { [provider.instanceId]: override },
+          },
         ),
       ),
     );

@@ -6,6 +6,14 @@ import { ProviderDriverKind, ProviderInstanceId } from "./providerInstance.ts";
 export const DelegationMode = Schema.Literals(["native-preferred", "t3-managed"]);
 export type DelegationMode = typeof DelegationMode.Type;
 
+export const DelegationRoutingPriority = Schema.Literals(["usage", "cost", "provider"]);
+export type DelegationRoutingPriority = typeof DelegationRoutingPriority.Type;
+
+const MinimumHeadroomPercent = Schema.Number.check(
+  Schema.isFinite(),
+  Schema.isBetween({ minimum: 0, maximum: 100 }),
+);
+
 export const DelegationCapability = Schema.Literals([
   "lookup",
   "discovery",
@@ -46,7 +54,19 @@ export const DelegationPolicy = Schema.Struct({
     Schema.withDecodingDefault(Effect.succeed("native-preferred" as const)),
   ),
   allowCredits: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
-  balanceUsage: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
+  routingPriority: DelegationRoutingPriority.pipe(
+    Schema.withDecodingDefault(Effect.succeed("usage" as const)),
+  ),
+  preferredProviderInstanceId: Schema.NullOr(ProviderInstanceId).pipe(
+    Schema.withDecodingDefault(Effect.succeed(null)),
+  ),
+  allowFallback: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
+  minimumHeadroomPercent: MinimumHeadroomPercent.pipe(
+    Schema.withDecodingDefault(Effect.succeed(0)),
+  ),
+  allowCreditsByProvider: Schema.Record(ProviderInstanceId, Schema.Boolean).pipe(
+    Schema.withDecodingDefault(Effect.succeed({})),
+  ),
   preferAlternateProvider: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
   routes: Schema.Array(DelegationModelRoute).pipe(Schema.withDecodingDefault(Effect.succeed([]))),
 });
@@ -56,7 +76,11 @@ export const DelegationPolicyPatch = Schema.Struct({
   version: Schema.optionalKey(Schema.Literal(1)),
   mode: Schema.optionalKey(DelegationMode),
   allowCredits: Schema.optionalKey(Schema.Boolean),
-  balanceUsage: Schema.optionalKey(Schema.Boolean),
+  routingPriority: Schema.optionalKey(DelegationRoutingPriority),
+  preferredProviderInstanceId: Schema.optionalKey(Schema.NullOr(ProviderInstanceId)),
+  allowFallback: Schema.optionalKey(Schema.Boolean),
+  minimumHeadroomPercent: Schema.optionalKey(MinimumHeadroomPercent),
+  allowCreditsByProvider: Schema.optionalKey(Schema.Record(ProviderInstanceId, Schema.Boolean)),
   preferAlternateProvider: Schema.optionalKey(Schema.Boolean),
   routes: Schema.optionalKey(Schema.Array(DelegationModelRoute)),
 });
@@ -75,6 +99,7 @@ export const DelegationRoutingDecision = Schema.Struct({
     "alternate-provider",
     "alternate-model",
     "lowest-cost",
+    "preferred-provider",
   ]),
   headroomPercent: Schema.NullOr(Schema.Number),
   usesCredits: Schema.optional(Schema.Boolean),

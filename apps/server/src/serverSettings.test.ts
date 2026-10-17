@@ -180,6 +180,39 @@ it.layer(NodeServices.layer)("server settings", (it) => {
       }),
     ).pipe(Effect.provide(layerServerSettings())),
   );
+  it.effect.each([true, false])(
+    "migrates legacy delegation balance %s and preserves preferences",
+    (balanceUsage) =>
+      Effect.gen(function* () {
+        const config = yield* ServerConfig.ServerConfig;
+        const fs = yield* FileSystem.FileSystem;
+        const service = yield* ServerSettingsModule.ServerSettingsService;
+        yield* fs.writeFileString(
+          config.settingsPath,
+          JSON.stringify({
+            enableAgentBrowserAccess: false,
+            favorites: [{ provider: "codex_work", model: "sol" }],
+            delegationPolicy: { balanceUsage, allowCredits: true, preferAlternateProvider: false },
+          }),
+        );
+        const settings = yield* service.getSettings;
+        assert.equal(settings.delegationPolicy.routingPriority, balanceUsage ? "usage" : "cost");
+        assert.isTrue(settings.delegationPolicy.allowCredits);
+        assert.isFalse(settings.delegationPolicy.preferAlternateProvider);
+        assert.isFalse(settings.enableAgentBrowserAccess);
+        assert.deepEqual(settings.favorites, [
+          { provider: ProviderInstanceId.make("codex_work"), model: "sol" },
+        ]);
+        const saved = yield* fs.readFileString(config.settingsPath);
+        assert.notInclude(saved, "balanceUsage");
+        const decoded = yield* decodeServerSettingsJson(saved);
+        assert.deepEqual(decoded.delegationPolicy, settings.delegationPolicy);
+        yield* service.updateSettings({ delegationPolicy: { routingPriority: "provider" } });
+        assert.equal((yield* service.getSettings).delegationPolicy.routingPriority, "provider");
+        assert.notInclude(yield* fs.readFileString(config.settingsPath), "balanceUsage");
+      }).pipe(Effect.provide(layerServerSettings())),
+  );
+
   it.effect("migrates saved token delivery to paragraph buffering without resetting settings", () =>
     Effect.gen(function* () {
       const config = yield* ServerConfig.ServerConfig;

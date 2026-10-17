@@ -22,6 +22,12 @@ describe("T3 orchestration provider instructions", () => {
     );
   });
 
+  it("requires target fallback permission and per-instance paid permission", () => {
+    assert.include(T3_CODE_ORCHESTRATION_INSTRUCTIONS, "delegationPolicy.allowFallback");
+    assert.include(T3_CODE_ORCHESTRATION_INSTRUCTIONS, "allowCreditsByProvider");
+    assert.include(T3_CODE_ORCHESTRATION_INSTRUCTIONS, "Do not bypass strict target policy");
+  });
+
   it("reports missing tools in managed mode and omits unavailable native guidance", () => {
     assert.equal(t3DelegationInstructions("native-preferred", false), "");
     assert.include(

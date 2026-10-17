@@ -1152,6 +1152,26 @@ describe("synchronized model preferences", () => {
 });
 
 describe("applyServerSettingsPatch delegation policy", () => {
+  it("clears a preferred provider and replaces paid overrides without changing other controls", () => {
+    const current = decodeSettings({
+      delegationPolicy: {
+        preferredProviderInstanceId: "codex",
+        allowCreditsByProvider: { codex: true, claudeAgent: false },
+        minimumHeadroomPercent: 20,
+      },
+    });
+    const patch = decodePatch({
+      delegationPolicy: {
+        preferredProviderInstanceId: null,
+        allowCreditsByProvider: { codex: false },
+      },
+    });
+    const next = applyServerSettingsPatch(current, patch).delegationPolicy;
+    expect(next.preferredProviderInstanceId).toBeNull();
+    expect(next.allowCreditsByProvider).toEqual({ codex: false });
+    expect(next.minimumHeadroomPercent).toBe(20);
+  });
+
   const route = {
     driver: "codex",
     model: "gpt-6.1-sol",
@@ -1164,9 +1184,9 @@ describe("applyServerSettingsPatch delegation policy", () => {
 
   it("preserves each destination's routes and booleans for a shared mode-only patch", () => {
     const destinations = [
-      { balanceUsage: false, preferAlternateProvider: true, routes: [route] },
+      { routingPriority: "cost", preferAlternateProvider: true, routes: [route] },
       {
-        balanceUsage: true,
+        routingPriority: "usage",
         preferAlternateProvider: false,
         routes: [{ ...route, driver: "claudeAgent", model: "claude-sonnet-4-6" }],
       },
@@ -1184,7 +1204,7 @@ describe("applyServerSettingsPatch delegation policy", () => {
   it("replaces route arrays and permits an explicit empty route list", () => {
     const current = decodeSettings({
       delegationPolicy: {
-        balanceUsage: false,
+        routingPriority: "cost",
         routes: [route, { ...route, model: "gpt-6-astra" }],
       },
     });

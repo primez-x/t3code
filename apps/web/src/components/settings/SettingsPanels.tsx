@@ -57,6 +57,7 @@ import * as Schema from "effect/Schema";
 import { APP_VERSION, HOSTED_APP_CHANNEL, HOSTED_APP_CHANNEL_LABEL } from "../../branding";
 import { CliCommandSettingsRow } from "./CliCommandSettingsRow";
 import { MobileAppSettingsRow } from "./MobileAppSettingsRow";
+import { DelegationRoutingSettings } from "./DelegationRoutesEditor";
 import {
   canCheckForUpdate,
   getDesktopUpdateButtonTooltip,
@@ -2052,15 +2053,12 @@ export function GeneralSettingsPanel() {
   const hasServerTargets = connectedEnvironments.length > 0;
   const [backgroundActivityDialogOpen, setBackgroundActivityDialogOpen] = useState(false);
   const mixedResponseStreamingMode = useScopedSettingsMixed(["responseStreamingMode"]);
-  const delegationSettingIsMixed = (
-    key: "mode" | "balanceUsage" | "preferAlternateProvider" | "allowCredits",
-  ) =>
+  const delegationSettingIsMixed = (key: "mode" | "preferAlternateProvider" | "allowCredits") =>
     connectedEnvironments.some(
       (target) =>
         target.serverConfig?.settings.delegationPolicy[key] !== settings.delegationPolicy[key],
     );
   const mixedDelegationMode = delegationSettingIsMixed("mode");
-  const mixedDelegationUsage = delegationSettingIsMixed("balanceUsage");
   const mixedDelegationDiversity = delegationSettingIsMixed("preferAlternateProvider");
   const mixedDelegationCredits = delegationSettingIsMixed("allowCredits");
   const lastEnabledProjectGroupingMode = useRef<SidebarProjectGroupingMode>(
@@ -2390,7 +2388,7 @@ export function GeneralSettingsPanel() {
               : `${
                   settings.delegationPolicy.mode === "native-preferred"
                     ? "Use provider-native subagents when supported. T3 handles other assignments."
-                    : "T3 selects delegated providers, models, and effort automatically. Available explicit requests take precedence. Unavailable targets may use a capable substitute with an explanation. T3 also controls native subagent launches."
+                    : "T3 selects delegated providers, models, and effort automatically. Available explicit requests take precedence. The fallback setting controls unavailable targets. T3 also controls native subagent launches."
                 } Changes apply to new delegated tasks and turns after the agent session refreshes. The root model stays unchanged.`
           }
           control={
@@ -2418,31 +2416,14 @@ export function GeneralSettingsPanel() {
             </Select>
           }
         />
-        <SettingsRow
-          id="delegation-usage-balance"
-          title="Usage balance"
-          mixed={mixedDelegationUsage}
-          serverScoped
-          settingKeys={["delegationPolicy"]}
-          description="Favor capable models with more usage available. When off, remaining usage does not rank choices. Models with exhausted quotas need allowed, available paid usage."
-          control={
-            <Switch
-              mixed={mixedDelegationUsage}
-              checked={!mixedDelegationUsage && settings.delegationPolicy.balanceUsage}
-              onCheckedChange={(balanceUsage) =>
-                updateSettings({ delegationPolicy: { balanceUsage } })
-              }
-              aria-label="Delegation usage balance"
-            />
-          }
-        />
+        <DelegationRoutingSettings />
         <SettingsRow
           id="delegation-model-diversity"
-          title="Model diversity"
+          title="Prefer another provider"
           mixed={mixedDelegationDiversity}
           serverScoped
           settingKeys={["delegationPolicy"]}
-          description="Favor another provider or model when usage is comparable or unknown. When off, choose by capability, usage, and cost. Both modes follow the same selection rules. T3 managed enforces those rules. Native preferred relies on agent instructions."
+          description="Prefer another provider when choices rank equally. Off removes this preference. Capability and advisor requirements always apply."
           control={
             <Switch
               mixed={mixedDelegationDiversity}
@@ -2452,7 +2433,7 @@ export function GeneralSettingsPanel() {
               onCheckedChange={(preferAlternateProvider) =>
                 updateSettings({ delegationPolicy: { preferAlternateProvider } })
               }
-              aria-label="Delegation model diversity"
+              aria-label="Delegation prefer another provider"
             />
           }
         />
@@ -2462,7 +2443,7 @@ export function GeneralSettingsPanel() {
           mixed={mixedDelegationCredits}
           serverScoped
           settingKeys={["delegationPolicy"]}
-          description="Allow delegated tasks to use available credits or extra usage after subscription limits. Off excludes models with exhausted quotas."
+          description="Allow available paid usage after subscription quota runs out. Off excludes paid usage unless a provider override allows paid usage."
           control={
             <Switch
               mixed={mixedDelegationCredits}

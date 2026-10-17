@@ -14,6 +14,8 @@ import { AppText as Text } from "../../components/ui/AppText";
 import { mobilePreferencesAtom, updateMobilePreferencesAtom } from "../../state/preferences";
 import { serverEnvironment } from "../../state/server";
 import { useAtomCommand } from "../../state/use-atom-command";
+import { NumberField } from "../../components/ui/NumberField";
+import { DelegationRoutesEditor } from "./DelegationRoutesEditor";
 import { SettingsSection } from "./components/SettingsSection";
 import { SettingsProjectOverridesSection } from "./components/SettingsProjectOverridesSection";
 import { SettingsSwitchRow } from "./components/SettingsSwitchRow";
@@ -98,14 +100,15 @@ function DelegationSettingsRows() {
       setPending(false);
     });
   };
-  const uniform = <K extends "mode" | "balanceUsage" | "preferAlternateProvider" | "allowCredits">(
-    key: K,
-  ) =>
+  const uniform = <K extends keyof typeof reference>(key: K) =>
     selectedTargets.every(
       (target) => target.serverConfig.settings.delegationPolicy[key] === reference[key],
     )
       ? reference[key]
       : null;
+
+  const singleTarget = selectedTargets.length === 1 ? selectedTargets[0] : undefined;
+  const reserve = uniform("minimumHeadroomPercent");
 
   return (
     <View className="gap-3">
@@ -119,24 +122,82 @@ function DelegationSettingsRows() {
         />
         <SettingsChoiceRow
           label="T3 managed"
-          description="T3 selects delegated providers, models, and effort automatically. Available explicit requests take precedence. Unavailable targets may use a capable substitute with an explanation. T3 also controls native subagent launches."
+          description="T3 selects providers, models, and effort. Available explicit requests take precedence. T3 also controls native subagent launches."
           separated
           selected={uniform("mode") === "t3-managed"}
           disabled={disabled}
           onPress={() => writeToAll({ mode: "t3-managed" })}
         />
+      </SettingsSection>
+      <SettingsSection title="Routing priority">
+        {(
+          [
+            [
+              "usage",
+              "Available quota",
+              "Favor capable models with more subscription quota available.",
+            ],
+            [
+              "cost",
+              "Lowest estimated cost",
+              "Favor capable models with the lowest route cost estimate.",
+            ],
+            [
+              "provider",
+              "Preferred provider",
+              "Favor the selected provider, or the parent provider when no provider is selected.",
+            ],
+          ] as const
+        ).map(([routingPriority, label, description], index) => (
+          <SettingsChoiceRow
+            key={routingPriority}
+            label={label}
+            description={description}
+            separated={index > 0}
+            selected={uniform("routingPriority") === routingPriority}
+            disabled={disabled}
+            onPress={() => writeToAll({ routingPriority })}
+          />
+        ))}
         <SettingsSwitchRow
-          icon="clock"
-          label="Usage balance"
-          subtitle="Favor capable models with more usage available. When off, remaining usage does not rank choices. Models with exhausted quotas need allowed, available paid usage."
-          value={uniform("balanceUsage")}
+          icon="arrow.triangle.branch"
+          label="Allow target fallback"
+          subtitle="Allow a capable substitute when the requested target is unavailable. Off reports the target as unavailable."
+          value={uniform("allowFallback")}
           disabled={disabled}
-          onValueChange={(balanceUsage) => writeToAll({ balanceUsage })}
+          onValueChange={(allowFallback) => writeToAll({ allowFallback })}
         />
+        <View className="gap-2 px-4 py-3">
+          <Text className="text-base text-foreground">
+            Quota reserve{reserve === null ? " · Mixed" : ""}
+          </Text>
+          <Text className="text-sm text-foreground-muted">
+            Skip providers at or below this percentage. A reserve above zero also excludes unknown
+            quota. Zero disables the reserve.
+          </Text>
+          <NumberField
+            label="Quota reserve"
+            min={0}
+            max={100}
+            value={reserve ?? 0}
+            formatValue={(value) => `${value}%`}
+            disabled={disabled}
+            onValueChange={(minimumHeadroomPercent) => writeToAll({ minimumHeadroomPercent })}
+          />
+        </View>
+        {reserve === null ? (
+          <SettingsChoiceRow
+            label="Clear reserve for selected environments"
+            description="Apply zero to every selected environment."
+            selected={false}
+            disabled={disabled}
+            onPress={() => writeToAll({ minimumHeadroomPercent: 0 })}
+          />
+        ) : null}
         <SettingsSwitchRow
           icon="arrow.triangle.branch"
           label="Model diversity"
-          subtitle="Favor another provider or model when usage is comparable or unknown. When off, choose by capability, usage, and cost."
+          subtitle="Favor another provider or model when candidates rank equally. Off keeps the selected priority without this preference."
           value={uniform("preferAlternateProvider")}
           disabled={disabled}
           onValueChange={(preferAlternateProvider) => writeToAll({ preferAlternateProvider })}
@@ -144,12 +205,84 @@ function DelegationSettingsRows() {
         <SettingsSwitchRow
           icon="ticket"
           label="Allow credits"
-          subtitle="Allow delegated tasks to use available credits or extra usage after subscription limits. Off excludes models with exhausted quotas."
+          subtitle="Allow paid usage only after subscription quota is exhausted. Off excludes exhausted providers unless a provider override allows paid usage."
           value={uniform("allowCredits")}
           disabled={disabled}
           onValueChange={(allowCredits) => writeToAll({ allowCredits })}
         />
       </SettingsSection>
+      {singleTarget ? (
+        <>
+          <SettingsSection title="Preferred provider">
+            <SettingsChoiceRow
+              label="Use parent provider"
+              description="Use the provider from the parent task."
+              selected={reference.preferredProviderInstanceId === null}
+              disabled={disabled}
+              onPress={() => writeToAll({ preferredProviderInstanceId: null })}
+            />
+            {singleTarget.serverConfig.providers.map((provider) => (
+              <SettingsChoiceRow
+                key={provider.instanceId}
+                label={provider.displayName ?? provider.instanceId}
+                description={provider.instanceId}
+                separated
+                selected={reference.preferredProviderInstanceId === provider.instanceId}
+                disabled={disabled}
+                onPress={() => writeToAll({ preferredProviderInstanceId: provider.instanceId })}
+              />
+            ))}
+          </SettingsSection>
+          <SettingsSection title="Provider credit overrides">
+            <Text className="px-4 py-3 text-sm text-foreground-muted">
+              Overrides apply only after subscription quota is exhausted. Use global follows Allow
+              credits.
+            </Text>
+            {singleTarget.serverConfig.providers.map((provider) => (
+              <View key={provider.instanceId}>
+                <Text className="px-4 py-2 font-t3-medium text-foreground">
+                  {provider.displayName ?? provider.instanceId}
+                </Text>
+                {(
+                  [
+                    [undefined, "Use global"],
+                    [true, "Allow"],
+                    [false, "Do not allow"],
+                  ] as const
+                ).map(([value, label]) => (
+                  <SettingsChoiceRow
+                    key={label}
+                    label={label}
+                    separated
+                    selected={reference.allowCreditsByProvider[provider.instanceId] === value}
+                    disabled={disabled}
+                    onPress={() => {
+                      const allowCreditsByProvider = { ...reference.allowCreditsByProvider };
+                      if (value === undefined) delete allowCreditsByProvider[provider.instanceId];
+                      else allowCreditsByProvider[provider.instanceId] = value;
+                      writeToAll({ allowCreditsByProvider });
+                    }}
+                  />
+                ))}
+              </View>
+            ))}
+          </SettingsSection>
+          <DelegationRoutesEditor
+            key={`${singleTarget.environmentId}:${JSON.stringify(reference.routes)}`}
+            routes={reference.routes}
+            drivers={[
+              ...new Set(singleTarget.serverConfig.providers.map((provider) => provider.driver)),
+            ]}
+            disabled={disabled}
+            onChange={(routes) => writeToAll({ routes })}
+          />
+        </>
+      ) : (
+        <Text className="px-2 text-sm text-foreground-muted">
+          Select one environment to change the preferred provider, provider credit overrides, and
+          model routes.
+        </Text>
+      )}
       <Text className="px-2 text-sm text-foreground-muted">
         Both modes follow the same selection rules. T3 managed enforces those rules. Native
         preferred relies on agent instructions. Changes apply to new delegated tasks and turns after

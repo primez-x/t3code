@@ -13,7 +13,11 @@ export function makeDelegationFixtures(
     version: 1,
     mode: "native-preferred",
     allowCredits: false,
-    balanceUsage: false,
+    routingPriority: "cost",
+    preferredProviderInstanceId: null,
+    allowFallback: true,
+    minimumHeadroomPercent: 0,
+    allowCreditsByProvider: {},
     preferAlternateProvider: false,
     routes: models.map(({ driver, model }) => ({
       driver,

@@ -26,7 +26,7 @@ export class DelegationSelectionError extends Schema.TaggedError<DelegationSelec
     role: DelegationTaskRole,
     requestedModel: Schema.optionalKey(Schema.String),
     unavailableReason: Schema.optionalKey(
-      Schema.Literals(["provider-unavailable", "usage-exhausted"]),
+      Schema.Literals(["provider-unavailable", "usage-exhausted", "headroom-reserved"]),
     ),
     runtimeMode: Schema.optionalKey(RuntimeMode),
     constraint: Schema.optionalKey(Schema.Literal("astra-fallback-only")),
@@ -120,6 +120,13 @@ function applicableWindow(window: ServerProviderUsageWindow, model: string): boo
 
 function quotaExhausted(quota: Quota): boolean {
   return quota.headroomPercent === 0 && quota.usesCredits !== true;
+}
+
+function quotaReserved(quota: Quota, minimumHeadroomPercent: number): boolean {
+  if (quota.usesCredits) return false;
+  return quota.headroomPercent === null
+    ? minimumHeadroomPercent > 0
+    : quota.headroomPercent > 0 && quota.headroomPercent <= minimumHeadroomPercent;
 }
 
 function quotaFor(
@@ -232,7 +239,13 @@ function optionsFor(
 /** Select the requested target first, then explain any availability substitution. */
 export function selectDelegationTarget(input: DelegationSelectionInput): DelegationSelectionResult {
   const primary = selectDelegationTargetOnce(input);
-  if (primary.ok || !input.requestedTarget || !primary.error.unavailableReason) return primary;
+  if (
+    primary.ok ||
+    !input.requestedTarget ||
+    !input.policy.allowFallback ||
+    !primary.error.unavailableReason
+  )
+    return primary;
   const { requestedTarget, ...automaticInput } = input;
   const substitute = selectDelegationTargetOnce(automaticInput);
   if (!substitute.ok) return primary;
@@ -251,7 +264,9 @@ export function selectDelegationTarget(input: DelegationSelectionInput): Delegat
         reason:
           primary.error.unavailableReason === "usage-exhausted"
             ? "Requested target has no remaining usage."
-            : "Requested provider is unavailable for this task.",
+            : primary.error.unavailableReason === "headroom-reserved"
+              ? "Requested target cannot satisfy the subscription headroom reserve."
+              : "Requested provider is unavailable for this task.",
       },
     },
   };
@@ -289,6 +304,8 @@ function selectDelegationTargetOnce(input: DelegationSelectionInput): Delegation
   const opusRoot = isFamily(input.rootModel, "claude-opus");
   const advisorFamily = opusRoot ? "claude-fable" : "claude-opus";
   const usableProviders = input.providers.filter((provider) => canServe(provider, input));
+  const allowCreditsFor = (provider: ServerProvider) =>
+    input.policy.allowCreditsByProvider[provider.instanceId] ?? input.policy.allowCredits;
   const claudeAvailable = usableProviders.some((provider) => {
     if (provider.driver !== "claudeAgent") return false;
     const advisorModels = provider.models.filter(
@@ -297,7 +314,7 @@ function selectDelegationTargetOnce(input: DelegationSelectionInput): Delegation
     const relevantModels =
       advisorModels.length > 0 ? advisorModels.map((model) => model.slug) : [advisorFamily];
     return relevantModels.some(
-      (model) => !quotaExhausted(quotaFor(provider, model, input.nowMs, input.policy.allowCredits)),
+      (model) => !quotaExhausted(quotaFor(provider, model, input.nowMs, allowCreditsFor(provider))),
     );
   });
   const parentDriver = input.providers.find(
@@ -320,7 +337,7 @@ function selectDelegationTargetOnce(input: DelegationSelectionInput): Delegation
             !model.isCustom &&
             isFamily(model.slug, advisorFamily) &&
             excluded(model) &&
-            !quotaExhausted(quotaFor(provider, model.slug, input.nowMs, input.policy.allowCredits)),
+            !quotaExhausted(quotaFor(provider, model.slug, input.nowMs, allowCreditsFor(provider))),
         ),
     );
   const automaticAdvisor = advisor && input.requestedTarget === undefined;
@@ -395,8 +412,9 @@ function selectDelegationTargetOnce(input: DelegationSelectionInput): Delegation
           continue;
         if (input.requestedTarget) eligibleRequested.push({ provider, model });
         if (!canServe(provider, input)) continue;
-        const quota = quotaFor(provider, model.slug, input.nowMs, input.policy.allowCredits);
-        if (quotaExhausted(quota)) continue;
+        const quota = quotaFor(provider, model.slug, input.nowMs, allowCreditsFor(provider));
+        if (quotaExhausted(quota) || quotaReserved(quota, input.policy.minimumHeadroomPercent))
+          continue;
         candidates.push({
           provider,
           model,
@@ -421,11 +439,24 @@ function selectDelegationTargetOnce(input: DelegationSelectionInput): Delegation
         : servingRequested.length > 0 &&
             servingRequested.every(({ provider, model }) =>
               quotaExhausted(
-                quotaFor(provider, model.slug, input.nowMs, input.policy.allowCredits),
+                quotaFor(provider, model.slug, input.nowMs, allowCreditsFor(provider)),
               ),
             )
           ? ("usage-exhausted" as const)
-          : undefined;
+          : servingRequested.length > 0 &&
+              servingRequested.every(({ provider, model }) => {
+                const quota = quotaFor(
+                  provider,
+                  model.slug,
+                  input.nowMs,
+                  allowCreditsFor(provider),
+                );
+                return (
+                  quotaExhausted(quota) || quotaReserved(quota, input.policy.minimumHeadroomPercent)
+                );
+              })
+            ? ("headroom-reserved" as const)
+            : undefined;
     const catalogAdvisor = usableProviders.flatMap((provider) =>
       provider.driver === "claudeAgent"
         ? provider.models.filter((model) => !model.isCustom && isFamily(model.slug, advisorFamily))
@@ -455,19 +486,32 @@ function selectDelegationTargetOnce(input: DelegationSelectionInput): Delegation
   // Paid credits keep an exhausted subscription eligible without changing the reported subscription percentage.
   const availableHeadroom = (candidate: Candidate) =>
     candidate.quota.usesCredits ? 100 : candidate.quota.headroomPercent;
+  const preferredInstanceId = input.policy.preferredProviderInstanceId ?? input.parent.instanceId;
+  const preferred =
+    input.policy.routingPriority === "provider"
+      ? candidates.filter((candidate) => candidate.provider.instanceId === preferredInstanceId)
+      : [];
+  const lowestCost = candidates.reduce(
+    (lowest, candidate) => Math.min(lowest, candidate.route.costPerTask),
+    Number.POSITIVE_INFINITY,
+  );
+  const prioritized =
+    preferred.length > 0
+      ? preferred
+      : input.policy.routingPriority === "cost"
+        ? candidates.filter((candidate) => candidate.route.costPerTask === lowestCost)
+        : candidates;
   // Filter by a fixed maximum before comparison so tolerance cannot produce cyclic rankings.
-  const greatestHeadroom = candidates.reduce(
+  const greatestHeadroom = prioritized.reduce(
     (greatest, candidate) =>
       Math.max(greatest, availableHeadroom(candidate) ?? Number.NEGATIVE_INFINITY),
     Number.NEGATIVE_INFINITY,
   );
-  const balanced = input.policy.balanceUsage
-    ? candidates.filter(
-        (candidate) =>
-          greatestHeadroom === Number.NEGATIVE_INFINITY ||
-          (availableHeadroom(candidate) ?? Number.NEGATIVE_INFINITY) >= greatestHeadroom - 5,
-      )
-    : candidates;
+  const balanced = prioritized.filter(
+    (candidate) =>
+      greatestHeadroom === Number.NEGATIVE_INFINITY ||
+      (availableHeadroom(candidate) ?? Number.NEGATIVE_INFINITY) >= greatestHeadroom - 5,
+  );
   const alternateProvider = (candidate: Candidate) =>
     input.policy.preferAlternateProvider &&
     parentDriver !== undefined &&
@@ -499,13 +543,17 @@ function selectDelegationTargetOnce(input: DelegationSelectionInput): Delegation
           ? "advisor-fable"
           : "advisor-opus"
         : "advisor-fallback"
-      : balanced.length < candidates.length
-        ? "headroom"
-        : alternateProvider(chosen)
-          ? "alternate-provider"
-          : alternateModel(chosen)
-            ? "alternate-model"
-            : "lowest-cost";
+      : preferred.length > 0
+        ? "preferred-provider"
+        : input.policy.routingPriority === "cost" && prioritized.length < candidates.length
+          ? "lowest-cost"
+          : balanced.length < prioritized.length
+            ? "headroom"
+            : alternateProvider(chosen)
+              ? "alternate-provider"
+              : alternateModel(chosen)
+                ? "alternate-model"
+                : "lowest-cost";
   return {
     ok: true,
     modelSelection: {

@@ -1,14 +1,20 @@
 import { expect, test } from "@effect/vitest";
-import { ProviderDriverKind, ProviderInstanceId, type ServerProvider } from "@t3tools/contracts";
+import {
+  DEFAULT_SERVER_SETTINGS,
+  ProviderDriverKind,
+  ProviderInstanceId,
+  type ServerProvider,
+} from "@t3tools/contracts";
 import { selectDelegationTarget } from "./delegationRouting.ts";
 import { resolveDelegationPolicy } from "./combinedDelegationRoutes.ts";
 
 test("the combined preset contains only supplied costs and bounded Muse routes", () => {
   const policy = resolveDelegationPolicy({
+    ...DEFAULT_SERVER_SETTINGS.delegationPolicy,
     version: 1,
     mode: "t3-managed",
     allowCredits: false,
-    balanceUsage: true,
+    routingPriority: "usage",
     preferAlternateProvider: true,
     routes: [],
   });
@@ -43,10 +49,11 @@ test("configured routes replace the built-in preset", () => {
   ] as const;
   expect(
     resolveDelegationPolicy({
+      ...DEFAULT_SERVER_SETTINGS.delegationPolicy,
       version: 1,
       mode: "native-preferred",
       allowCredits: false,
-      balanceUsage: false,
+      routingPriority: "cost",
       preferAlternateProvider: false,
       routes,
     }).routes,
@@ -85,10 +92,11 @@ test("the default Codex exact lookup floor uses Luna medium", () => {
     skills: [],
   };
   const policy = resolveDelegationPolicy({
+    ...DEFAULT_SERVER_SETTINGS.delegationPolicy,
     version: 1,
     mode: "t3-managed",
     allowCredits: false,
-    balanceUsage: true,
+    routingPriority: "usage",
     preferAlternateProvider: true,
     routes: [],
   });
