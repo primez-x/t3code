@@ -190,11 +190,11 @@ export interface LimitAccount {
   readonly limits: ServerProviderUsageLimits;
 }
 
-function latestObservation<T extends { readonly checkedAt: string }>(
+export function latestObservation<T extends { readonly checkedAt: string }>(
   current: T | undefined,
   next: T | undefined,
 ): T | undefined {
-  return next && (!current || Date.parse(next.checkedAt) > Date.parse(current.checkedAt))
+  return next && (!current || Date.parse(next.checkedAt) >= Date.parse(current.checkedAt))
     ? next
     : current;
 }

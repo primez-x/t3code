@@ -3,6 +3,7 @@ import type {
   ServerProviderUsageLimits,
   ServerProviderUsageWindow,
 } from "@t3tools/contracts";
+import { latestObservation } from "@t3tools/shared/usageLimits";
 
 const WINDOW_KIND_ORDER: Record<ServerProviderUsageWindow["kind"], number> = {
   session: 0,
@@ -65,10 +66,22 @@ export function applyUsageLimitsUpdate(input: {
   // Codex sends this notification beside every token-usage tick, almost
   // always with unchanged numbers. Decide "nothing changed" per window on
   // the way through so the no-op case never allocates a new snapshot.
-  const credits = update.credits === undefined ? previous?.credits : (update.credits ?? undefined);
+  const credits =
+    update.credits === undefined
+      ? previous?.credits
+      : update.credits === null
+        ? undefined
+        : latestObservation(previous?.credits, update.credits);
   const extraUsage =
-    update.extraUsage === undefined ? previous?.extraUsage : (update.extraUsage ?? undefined);
-  let changed =
+    update.extraUsage === undefined
+      ? previous?.extraUsage
+      : update.extraUsage === null
+        ? undefined
+        : latestObservation(previous?.extraUsage, update.extraUsage);
+  let windowsChanged = false;
+  const paidChanged =
+    credits?.checkedAt !== previous?.credits?.checkedAt ||
+    extraUsage?.checkedAt !== previous?.extraUsage?.checkedAt ||
     credits?.hasCredits !== previous?.credits?.hasCredits ||
     credits?.unlimited !== previous?.credits?.unlimited ||
     credits?.balance !== previous?.credits?.balance ||
@@ -90,18 +103,25 @@ export function applyUsageLimitsUpdate(input: {
     };
     if (existing === undefined || !usageWindowEquals(existing, next)) {
       merged.set(window.id, next);
-      changed = true;
+      windowsChanged = true;
     }
   }
-  if (!changed && previous !== undefined && previous.unavailable === undefined) {
+  if (
+    !paidChanged &&
+    !windowsChanged &&
+    previous !== undefined &&
+    previous.unavailable === undefined
+  ) {
     return previous;
   }
   return {
     ...makeUsageLimits({
-      checkedAt:
-        update.windows.length === 0 ? (previous?.checkedAt ?? input.checkedAt) : input.checkedAt,
+      checkedAt: windowsChanged ? input.checkedAt : (previous?.checkedAt ?? input.checkedAt),
       windows: merged.values(),
     }),
+    ...(previous?.credentialFingerprint !== undefined
+      ? { credentialFingerprint: previous.credentialFingerprint }
+      : {}),
     ...(previous?.resetCredits !== undefined ? { resetCredits: previous.resetCredits } : {}),
     ...(credits !== undefined ? { credits } : {}),
     ...(extraUsage !== undefined ? { extraUsage } : {}),
@@ -125,8 +145,24 @@ export function resolveUsageLimitsAfterProbe(input: {
   readonly probed: ServerProviderUsageLimits | undefined;
 }): ServerProviderUsageLimits | undefined {
   const { published, probed } = input;
-  if (probed?.unavailable?.reason === "probeFailed" && published && !published.unavailable) {
+  if (
+    probed?.unavailable?.reason === "probeFailed" &&
+    published &&
+    !published.unavailable &&
+    published.credentialFingerprint === probed.credentialFingerprint
+  ) {
     return published;
   }
-  return probed;
+  if (
+    !published ||
+    !probed ||
+    probed.unavailable ||
+    published.credentialFingerprint !== probed.credentialFingerprint
+  )
+    return probed;
+  const credits = latestObservation(published.credits, probed.credits);
+  const extraUsage = latestObservation(published.extraUsage, probed.extraUsage);
+  return credits === probed.credits && extraUsage === probed.extraUsage
+    ? probed
+    : { ...probed, credits, extraUsage };
 }

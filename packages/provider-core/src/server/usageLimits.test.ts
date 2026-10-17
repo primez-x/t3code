@@ -21,6 +21,27 @@ const weekly = {
 const published = { checkedAt, windows: [session, weekly] };
 
 describe("applyUsageLimitsUpdate", () => {
+  test("refreshes paid observations independently and ignores older paid updates", () => {
+    const extraUsage = { checkedAt, enabled: true, available: false, coversModelLimits: true };
+    const previous = { ...published, extraUsage, credentialFingerprint: "account-a" };
+    const timestamp = "2026-09-03T12:06:00.000Z";
+    const refreshed = applyUsageLimitsUpdate({
+      previous,
+      checkedAt: timestamp,
+      update: { windows: [session], extraUsage: { ...extraUsage, checkedAt: timestamp } },
+    });
+    expect(refreshed?.extraUsage?.checkedAt).toBe(timestamp);
+    expect(refreshed?.credentialFingerprint).toBe("account-a");
+    expect(refreshed?.checkedAt).toBe(checkedAt);
+    expect(
+      applyUsageLimitsUpdate({
+        previous: refreshed,
+        checkedAt: timestamp,
+        update: { windows: [], extraUsage: { ...extraUsage, available: true } },
+      }),
+    ).toBe(refreshed);
+  });
+
   test("merges paid-usage-only observations without refreshing quota windows", () => {
     const extraUsage = { checkedAt, enabled: true, available: true, coversModelLimits: true };
     const previous = { ...published, extraUsage };
@@ -40,8 +61,8 @@ describe("applyUsageLimitsUpdate", () => {
         previous,
         checkedAt: timestamp,
         update: { windows: [], extraUsage: { ...extraUsage, checkedAt: timestamp } },
-      }),
-    ).toBe(previous);
+      })?.extraUsage?.checkedAt,
+    ).toBe(timestamp);
     expect(
       applyUsageLimitsUpdate({
         previous,
@@ -97,8 +118,8 @@ describe("applyUsageLimitsUpdate", () => {
         previous,
         checkedAt,
         update: { windows: [], credits: { ...credits, checkedAt: "2026-09-03T12:00:05.000Z" } },
-      }),
-    ).toBe(previous);
+      })?.credits?.checkedAt,
+    ).toBe("2026-09-03T12:00:05.000Z");
   });
 
   it("returns the published object itself when no window moved", () => {
@@ -189,11 +210,52 @@ describe("applyUsageLimitsUpdate", () => {
 });
 
 describe("resolveUsageLimitsAfterProbe", () => {
+  test("keeps newer paid observations when an older probe completes later", () => {
+    const timestamp = "2026-09-03T12:06:00.000Z";
+    const credits = { checkedAt: timestamp, hasCredits: true, unlimited: false };
+    const extraUsage = {
+      checkedAt: timestamp,
+      enabled: true,
+      available: true,
+      coversModelLimits: true,
+    };
+    const current = { ...published, credits, extraUsage };
+    const probed = {
+      ...published,
+      checkedAt: "2026-09-03T12:05:00.000Z",
+      credits: { ...credits, checkedAt },
+      extraUsage: { ...extraUsage, checkedAt, available: null },
+    };
+    const merged = resolveUsageLimitsAfterProbe({ published: current, probed });
+    expect(merged?.extraUsage).toEqual(extraUsage);
+    expect(merged?.credits).toEqual(credits);
+    expect(merged?.checkedAt).toBe(probed.checkedAt);
+    const denial = {
+      ...probed,
+      extraUsage: { ...extraUsage, checkedAt: "2026-09-03T12:07:00.000Z", available: false },
+    };
+    expect(
+      resolveUsageLimitsAfterProbe({ published: current, probed: denial })?.extraUsage?.available,
+    ).toBe(false);
+    expect(
+      resolveUsageLimitsAfterProbe({
+        published: { ...current, credentialFingerprint: "old" },
+        probed: { ...probed, credentialFingerprint: "new" },
+      }),
+    ).toEqual({ ...probed, credentialFingerprint: "new" });
+  });
+
   it("keeps the last good windows through a failed probe but not an unsupported one", () => {
     const failed = { checkedAt, windows: [], unavailable: { reason: "probeFailed" as const } };
     const unsupported = { checkedAt, windows: [], unavailable: { reason: "unsupported" as const } };
     expect(resolveUsageLimitsAfterProbe({ published, probed: failed })).toBe(published);
     expect(resolveUsageLimitsAfterProbe({ published, probed: unsupported })).toBe(unsupported);
     expect(resolveUsageLimitsAfterProbe({ published: undefined, probed: failed })).toBe(failed);
+    expect(
+      resolveUsageLimitsAfterProbe({
+        published: { ...published, credentialFingerprint: "old" },
+        probed: { ...failed, credentialFingerprint: "new" },
+      }),
+    ).toEqual({ ...failed, credentialFingerprint: "new" });
   });
 });

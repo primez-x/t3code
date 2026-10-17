@@ -147,8 +147,7 @@ export function claudeRateLimitEventToUpdate(
     info.overageStatus === "allowed" ||
     info.overageStatus === "allowed_warning" ||
     info.isUsingOverage === true ||
-    info.overageInUse === true ||
-    (type === "overage" && info.status !== "rejected");
+    info.overageInUse === true;
   const hasExtraUsage =
     reason !== undefined || info.overageStatus !== undefined || allowed || type === "overage";
   if (!window && !hasExtraUsage) return undefined;

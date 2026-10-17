@@ -190,6 +190,16 @@ describe("claudeUsageResponseToLimits", () => {
 });
 
 describe("claudeRateLimitEventToUpdate", () => {
+  test("requires explicit paid availability for an overage event", () => {
+    expect(
+      claudeRateLimitEventToUpdate(
+        { status: "allowed", rateLimitType: "overage", isUsingOverage: false, overageInUse: false },
+        noNames,
+        checkedAt,
+      )?.extraUsage?.available,
+    ).toBeNull();
+  });
+
   test.each(["allowed", "allowed_warning"] as const)(
     "publishes provider-confirmed extra usage without a subscription update: %s",
     (overageStatus) => {
