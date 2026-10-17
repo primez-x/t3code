@@ -145,21 +145,19 @@ export function resolveUsageLimitsAfterProbe(input: {
   readonly probed: ServerProviderUsageLimits | undefined;
 }): ServerProviderUsageLimits | undefined {
   const { published, probed } = input;
+  const changedAccount =
+    published?.credentialFingerprint !== undefined &&
+    probed?.credentialFingerprint !== undefined &&
+    published.credentialFingerprint !== probed.credentialFingerprint;
   if (
     probed?.unavailable?.reason === "probeFailed" &&
     published &&
     !published.unavailable &&
-    published.credentialFingerprint === probed.credentialFingerprint
+    !changedAccount
   ) {
     return published;
   }
-  if (
-    !published ||
-    !probed ||
-    probed.unavailable ||
-    published.credentialFingerprint !== probed.credentialFingerprint
-  )
-    return probed;
+  if (!published || !probed || probed.unavailable || changedAccount) return probed;
   const credits = latestObservation(published.credits, probed.credits);
   const extraUsage = latestObservation(published.extraUsage, probed.extraUsage);
   return credits === probed.credits && extraUsage === probed.extraUsage

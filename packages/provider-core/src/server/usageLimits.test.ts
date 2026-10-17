@@ -251,6 +251,10 @@ describe("resolveUsageLimitsAfterProbe", () => {
     expect(resolveUsageLimitsAfterProbe({ published, probed: failed })).toBe(published);
     expect(resolveUsageLimitsAfterProbe({ published, probed: unsupported })).toBe(unsupported);
     expect(resolveUsageLimitsAfterProbe({ published: undefined, probed: failed })).toBe(failed);
+    const identified = { ...published, credentialFingerprint: "same-account" };
+    expect(resolveUsageLimitsAfterProbe({ published: identified, probed: failed })).toBe(
+      identified,
+    );
     expect(
       resolveUsageLimitsAfterProbe({
         published: { ...published, credentialFingerprint: "old" },
