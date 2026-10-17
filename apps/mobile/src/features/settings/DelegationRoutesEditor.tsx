@@ -30,7 +30,7 @@ export function DelegationRoutesEditor(props: {
   readonly routes: readonly DelegationModelRoute[];
   readonly drivers: readonly ProviderDriverKind[];
   readonly disabled: boolean;
-  readonly onChange: (routes: readonly DelegationModelRoute[]) => void;
+  readonly onChange: (routes: readonly DelegationModelRoute[]) => Promise<boolean>;
 }) {
   const [draft, setDraft] = useState<{
     index: number | null;
@@ -197,13 +197,12 @@ export function DelegationRoutesEditor(props: {
               <Button
                 label="Save route"
                 disabled={props.disabled || !valid}
-                onPress={() => {
+                onPress={async () => {
                   if (props.disabled || !valid || !isDelegationModelRoute(candidate)) return;
                   const routes = [...props.routes];
                   if (draft.index === null) routes.push(candidate);
                   else routes[draft.index] = candidate;
-                  props.onChange(routes);
-                  setDraft(null);
+                  if (await props.onChange(routes)) setDraft(null);
                 }}
               />
               <Button label="Cancel" onPress={() => setDraft(null)} />

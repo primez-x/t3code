@@ -4,7 +4,7 @@ import {
   ProviderDriverKind,
   ProviderInstanceId,
   type DelegationModelRoute,
-  type DelegationPolicy,
+  DelegationPolicy,
   type ModelSelection,
   type ServerProvider,
   ServerProviderUsageLimits,
@@ -16,6 +16,7 @@ const nowMs = Date.parse("2026-10-14T12:00:00Z");
 const checkedAt = "2026-10-14T11:59:00Z";
 const resetsAt = "2026-10-14T13:00:00Z";
 const decodeUsageLimits = Schema.decodeUnknownSync(ServerProviderUsageLimits);
+const decodePolicy = Schema.decodeUnknownSync(DelegationPolicy);
 const parent: ModelSelection = {
   instanceId: ProviderInstanceId.make("codex_main"),
   model: "gpt-6-sol",
@@ -162,6 +163,37 @@ describe("selectDelegationTarget", () => {
     ...codex,
     usageLimits: { ...limits(100), credits },
   });
+
+  test.each(["constructor", "toString", "hasOwnProperty"])(
+    "requires an own credit override for provider %s",
+    (instanceId) => {
+      const funded = { ...exhaustedWithCredits(), instanceId: ProviderInstanceId.make(instanceId) };
+      const decoded = decodePolicy({ ...policy() });
+      expect(select({ providers: [funded], policy: decoded }).ok).toBe(false);
+      expect(
+        selected(select({ providers: [funded], policy: { ...decoded, allowCredits: true } }))
+          .decision.usesCredits,
+      ).toBe(true);
+      expect(
+        select({
+          providers: [funded],
+          policy: {
+            ...decoded,
+            allowCredits: true,
+            allowCreditsByProvider: { [instanceId]: false },
+          },
+        }).ok,
+      ).toBe(false);
+      expect(
+        selected(
+          select({
+            providers: [funded],
+            policy: { ...decoded, allowCreditsByProvider: { [instanceId]: true } },
+          }),
+        ).decision.usesCredits,
+      ).toBe(true);
+    },
+  );
 
   test.each([
     ["usage", "claude_main"],

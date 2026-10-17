@@ -72,6 +72,15 @@ export const DelegationPolicy = Schema.Struct({
 });
 export type DelegationPolicy = typeof DelegationPolicy.Type;
 
+export function delegationCreditsOverride(
+  policy: DelegationPolicy,
+  providerInstanceId: ProviderInstanceId,
+): boolean | undefined {
+  return Object.hasOwn(policy.allowCreditsByProvider, providerInstanceId)
+    ? policy.allowCreditsByProvider[providerInstanceId]
+    : undefined;
+}
+
 export const DelegationPolicyPatch = Schema.Struct({
   version: Schema.optionalKey(Schema.Literal(1)),
   mode: Schema.optionalKey(DelegationMode),

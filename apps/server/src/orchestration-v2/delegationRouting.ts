@@ -3,6 +3,7 @@ import * as DateTime from "effect/DateTime";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import {
+  delegationCreditsOverride,
   DelegationCapability,
   DelegationTaskRole,
   RuntimeMode,
@@ -305,7 +306,7 @@ function selectDelegationTargetOnce(input: DelegationSelectionInput): Delegation
   const advisorFamily = opusRoot ? "claude-fable" : "claude-opus";
   const usableProviders = input.providers.filter((provider) => canServe(provider, input));
   const allowCreditsFor = (provider: ServerProvider) =>
-    input.policy.allowCreditsByProvider[provider.instanceId] ?? input.policy.allowCredits;
+    delegationCreditsOverride(input.policy, provider.instanceId) ?? input.policy.allowCredits;
   const claudeAvailable = usableProviders.some((provider) => {
     if (provider.driver !== "claudeAgent") return false;
     const advisorModels = provider.models.filter(

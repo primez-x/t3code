@@ -1,4 +1,4 @@
-import { AuthSettingsWriteScope } from "@t3tools/contracts";
+import { AuthSettingsWriteScope, delegationCreditsOverride } from "@t3tools/contracts";
 import { readEnvironmentScope, useEnvironmentsWithScope } from "../../state/session";
 import { AutoSettleDaysField } from "./components/AutoSettleDaysField";
 import { ScreenScrollView as ScrollView } from "../../components/ui/ScreenScrollView";
@@ -77,7 +77,9 @@ function DelegationSettingsRows() {
     pending ||
     selectedProjectKey !== null ||
     !selectedTargets.every((target) => writableEnvironments.has(target.environmentId));
-  const writeToAll = (delegationPolicy: NonNullable<ServerSettingsPatch["delegationPolicy"]>) => {
+  const writeToAll = async (
+    delegationPolicy: NonNullable<ServerSettingsPatch["delegationPolicy"]>,
+  ) => {
     if (
       writeInFlight.current ||
       selectedProjectKey !== null ||
@@ -85,20 +87,25 @@ function DelegationSettingsRows() {
         readEnvironmentScope(target.environmentId, AuthSettingsWriteScope),
       )
     )
-      return;
+      return false;
     writeInFlight.current = true;
     setPending(true);
-    void Promise.allSettled(
-      selectedTargets.map((target) =>
-        updateSettings({
-          environmentId: target.environmentId,
-          input: { patch: { delegationPolicy } },
-        }),
-      ),
-    ).finally(() => {
+    try {
+      const results = await Promise.allSettled(
+        selectedTargets.map((target) =>
+          updateSettings({
+            environmentId: target.environmentId,
+            input: { patch: { delegationPolicy } },
+          }),
+        ),
+      );
+      return results.every(
+        (result) => result.status === "fulfilled" && result.value._tag === "Success",
+      );
+    } finally {
       writeInFlight.current = false;
       setPending(false);
-    });
+    }
   };
   const uniform = <K extends keyof typeof reference>(key: K) =>
     selectedTargets.every(
@@ -254,7 +261,7 @@ function DelegationSettingsRows() {
                     key={label}
                     label={label}
                     separated
-                    selected={reference.allowCreditsByProvider[provider.instanceId] === value}
+                    selected={delegationCreditsOverride(reference, provider.instanceId) === value}
                     disabled={disabled}
                     onPress={() => {
                       const allowCreditsByProvider = { ...reference.allowCreditsByProvider };

@@ -9,6 +9,7 @@ import type {
   ProjectionRecords,
 } from "./ProjectionStore.ts";
 import {
+  delegationCreditsOverride,
   type ChatAttachment,
   type DelegationCapability,
   type DelegationTaskRole,
@@ -836,7 +837,7 @@ const make = Effect.gen(function* () {
           provider.usageLimits?.extraUsage?.checkedAt,
         ];
         const needsCreditRefresh =
-          (policy.allowCreditsByProvider[provider.instanceId] ?? policy.allowCredits) &&
+          (delegationCreditsOverride(policy, provider.instanceId) ?? policy.allowCredits) &&
           provider.usageLimits?.windows.some((window) => window.usedPercent === 100) &&
           !paidObservations.some((timestamp) => {
             const observed = Date.parse(timestamp ?? "");

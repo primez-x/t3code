@@ -1,5 +1,6 @@
 import { useRef, useState } from "react";
 import {
+  delegationCreditsOverride,
   DelegationModelRoute,
   ProviderInstanceId,
   type DelegationPolicyPatch,
@@ -259,7 +260,7 @@ export function DelegationRoutingSettings() {
             {singleEnvironment && creditProviderIds.length > 0 ? (
               creditProviderIds.map((id) => {
                 const provider = providers.find((candidate) => candidate.instanceId === id);
-                const override = policy.allowCreditsByProvider[id];
+                const override = delegationCreditsOverride(policy, id);
                 return (
                   <div key={id} className="flex flex-wrap items-center justify-between gap-2">
                     <span className="text-xs">
